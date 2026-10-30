@@ -49,7 +49,8 @@ set(RT_C ${RT_C}
     "${CMAKE_CURRENT_SOURCE_DIR}/nvn/maxwell/translate.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/platform/android.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/platform/android_jni.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/android_touch.c")
+    "${CMAKE_CURRENT_SOURCE_DIR}/android_touch.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/android_touch_ui.cpp")
 file(GLOB RT_VK "${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/*.c")
 list(APPEND RT_C ${RT_VK})
 
@@ -98,7 +99,8 @@ find_library(SDL3_LIB NAMES SDL3 PATHS "${CMAKE_SOURCE_DIR}/../packaging/android
 target_include_directories(main PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${IMGUI}" "${IMGUI}/imgui" "${IMGUI}/imgui/backends"
-    ${SDL3_INCLUDE_DIR})
+    ${SDL3_INCLUDE_DIR}
+    ${FFMPEG_INCLUDE_DIR})
 
 target_compile_definitions(main PRIVATE
     __ANDROID__=1
@@ -128,14 +130,23 @@ if(USE_SYSTEM_SHADERC)
     target_link_libraries(main PRIVATE shaderc_shared)
 endif()
 
-# ffmpeg (cinematicas): si no esta, movie.c debe compilarse sin el
-# (ver parche movie: MHGU_NO_FFMPEG). En Android es mas comodo MediaCodec.
-if(DEFINED ENV{FFMPEG_ANDROID_DIR})
-    target_include_directories(main PRIVATE "$ENV{FFMPEG_ANDROID_DIR}/include")
-    target_link_directories(main PRIVATE "$ENV{FFMPEG_ANDROID_DIR}/lib")
-    target_link_libraries(main PRIVATE avformat avcodec avutil)
+# ---------------------------------------------------------------- cine (FFmpeg)
+# movie.c usa libavformat/libavcodec. Compilar FFmpeg para arm64 en CI son
+# 30-60 min extra, asi que por defecto se usan STUBS: el juego arranca pero las
+# cinematicas no se reproducen (movie:: devuelve error y sigue).
+#   -DBUILD_FFMPEG_STUBS=OFF -DFFMPEG_INCLUDE_DIR=... -DFFMPEG_LIB_DIR=...
+# para tener video de verdad.
+option(BUILD_FFMPEG_STUBS "usar stubs de FFmpeg (sin cinematicas)" ON)
+
+if(BUILD_FFMPEG_STUBS)
+    target_sources(main PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/hle/movie_stubs.c")
+    if(FFMPEG_INCLUDE_DIR)
+        target_include_directories(main PRIVATE "${FFMPEG_INCLUDE_DIR}")
+    endif()
 else()
-    target_compile_definitions(main PRIVATE MHGU_NO_FFMPEG=1)
+    target_include_directories(main PRIVATE "${FFMPEG_INCLUDE_DIR}")
+    target_link_directories(main PRIVATE "${FFMPEG_LIB_DIR}")
+    target_link_libraries(main PRIVATE avformat avcodec avutil)
 endif()
 
 set_target_properties(main PROPERTIES

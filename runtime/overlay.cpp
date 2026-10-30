@@ -38,6 +38,8 @@ void vk_lock(void);
 void vk_unlock(void);
 SDL_Window *ui_window(void);
 extern volatile uint64_t g_present_count;  // [AllGenU] frames the renderer presented (runtime/ui.c)
+// [AllGenU-Android] mandos tactiles: dibujo y panel (runtime/android_touch_ui.cpp)
+void android_touch_overlay_frame(float scale, bool menu_open);
 }
 
 // [AllGenU] presented frames a second, measured from g_present_count: with V-Sync the engine is paced a hair above the
@@ -490,6 +492,7 @@ void overlay_frame(void *cpu) {
         ImGui::PopStyleVar(2);
     }
     forge_imgui_run(cpu, FORGE_IMGUI_FREE_RENDER);
+    android_touch_overlay_frame(scale, open);  // [AllGenU-Android] tactiles
     ImGui::Render();
 
     ImDrawData *dd = ImGui::GetDrawData();

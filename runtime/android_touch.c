@@ -1,196 +1,209 @@
-// [AllGenU-Android] Mandos tactiles (botones en pantalla).
+// [AllGenU-Android] Mandos tactiles: dibujo, editor y ajustes en pantalla.
 //
-// El port de PC decidio "sin controles tactiles" (docs/research/android.md). Esto
-// lo cambia: una capa de botones dibujados encima del juego que produce el MISMO
-// estado de mando que un gamepad fisico. No toca input.c ni el juego: escribe
-// donde escriben el teclado y el mando SDL (host_input.c -> input_set).
+// Este archivo NO conoce ImGui (el resto del runtime es C, no C++). Expone datos
+// planos y el overlay C++ (runtime/overlay.cpp) los pinta con ImGui.
 //
-// Como funciona:
-//   1. Las zonas de los botones se definen en el layout (archivo de texto, ver
-//      abajo), en coordenadas normalizadas 0..1 sobre la PANTALLA.
-//   2. Cada frame, host_input_update() llama a ainput_poll(), que lee los dedos
-//      con SDL_GetTouchFingers() (multitouch real: se puede pulsar A + stick a la
-//      vez), aplica histeresis a los sticks y devuelve botones + ejes.
-//   3. El overlay (ImGui, runtime/overlay.cpp) dibuja las zonas con ainput_draw().
-//   4. Si un gamepad fisico esta conectado, se puede ocultar con el boton de la
-//      esquina o con la variable de entorno ALLGENU_TOUCH=0.
+//   android_touch_zones()      zonas activas  -> se dibujan sobre el juego
+//   android_touch_label()      texto de cada zona
+//   android_touch_edit_draw()  panel del editor (mover / tamano / opacidad)
 //
-// Layout (assets/touch_layout.txt, override en /data/data/<pkg>/files/touch_layout.txt):
-//      # tipo   id        x      y      r      [radio o w/h]
-//      button  A         0.88   0.80   0.055
-//      button  B         0.79   0.88   0.055
-//      button  X         0.79   0.72   0.055
-//      button  Y         0.70   0.80   0.055
-//      button  L         0.06   0.10   0.05
-//      button  R         0.16   0.10   0.05
-//      button  ZL        0.06   0.22   0.05
-//      button  ZR        0.16   0.22   0.05
-//      button  PLUS      0.95   0.50   0.035
-//      button  MINUS     0.88   0.50   0.035
-//      stick   L         0.15   0.75   0.11
-//      stick   R         0.80   0.35   0.11
-//      dpad    D         0.06   0.88   0.10
-//      camera L          0.55   0.10   0.09   # zona de arrastre para la camara (lado derecho)
-//
-// Nota sobre el escalado: SDL_GetTouchFingers da x/y normalizados a la PANTALLA,
-// asi que las zonas se colocan sobre la pantalla completa (letterbox incluido).
-// Si el juego se ve con bandas negras, mete los botones un poco hacia el centro.
+// Todo se guarda en:  files/touch_layout.txt  (se relee al arrancar)
+// Con ALLGENU_TOUCH=0 o el interruptor del menu, no se dibuja ni se toca nada.
 #include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <SDL3/SDL.h>
 
-#include "hle/input.h"
-
-#define BTN(x) (1ull << (x))
-
-// ---- estado que consume host_input.c
-static uint64_t t_buttons;
-static int t_lx, t_ly, t_rx, t_ry;
-static bool t_visible = true;
-
-uint64_t android_touch_buttons(void) { return t_visible ? t_buttons : 0; }
-void android_touch_sticks(int *lx, int *ly, int *rx, int *ry) {
-    *lx = t_visible ? t_lx : 0;
-    *ly = t_visible ? t_ly : 0;
-    *rx = t_visible ? t_rx : 0;
-    *ry = t_visible ? t_ry : 0;
-}
-bool android_touch_visible(void) { return t_visible; }
-void android_touch_set_visible(bool v) { t_visible = v; }
-
-// ---- zonas
 enum { Z_NONE = 0, Z_BUTTON, Z_STICK, Z_DPAD, Z_CAMERA };
 #define MAX_ZONES 48
+
+// Bits de boton, en el orden de host_input.c (BTN_*)
+enum { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_LS, BTN_RS, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
+       BTN_LEFT, BTN_UP, BTN_RIGHT, BTN_DOWN };
+#define BTN(b) (1ull << (b))
+
 typedef struct {
     int kind;
-    int btn;          // bit BTN_* (Z_BUTTON)
-    int stick;        // 0 = izquierdo, 1 = derecho (Z_STICK)
-    float x, y;       // centro, normalizado a la pantalla
-    float r;          // radio (boton/stick) o ancho de la zona tactil (dpad/camera)
-    float h;          // alto (dpad)
+    int btn;
+    int stick;         // 0 = izquierdo, 1 = derecho
+    float x, y, r, h;  // normalizado a la pantalla (0..1)
     char label[12];
 } Zone;
 
 static Zone zones[MAX_ZONES];
 static int nzones;
 
+static bool t_visible = true;      // dibujar y usar
+static bool t_edit;                // editor abierto
+static float t_opacity = 0.42f;    // opacidad del dibujo (0.1 .. 1.0)
+static int t_sel = -1;             // zona seleccionada en el editor
+static float t_scale_all = 1.0f;   // multiplicador de radio de todas las zonas
+static bool t_snap_grid = true;    // imantar al 1 % de la pantalla
+
+static uint64_t t_buttons;         // botones pulsados
+static int t_lx, t_ly, t_rx, t_ry; // sticks (-32767..32767)
+
+static const char *const k_names[16] = {"A",  "B",   "X",     "Y",     "LSTICK", "RSTICK", "L",     "R",
+                                        "ZL", "ZR",  "PLUS",  "MINUS", "LEFT",   "UP",     "RIGHT", "DOWN"};
+
 static int button_bit(const char *name) {
-    static const char *names[16] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR",
-                                    "PLUS", "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
     for (int i = 0; i < 16; i++)
-        if (!strcmp(name, names[i])) return i;
+        if (!strcmp(name, k_names[i])) return i;
     return -1;
 }
 
-// Busca el layout: junto al ejecutable, en home (app), o ALLGENU_TOUCH_LAYOUT.
+// ------------------------------------------------------------------ archivo
+// Busca el layout: ALLGENU_TOUCH_LAYOUT, la carpeta de datos de la app, la del
+// ejecutable y assets/.
+static bool writable_path(char *out, size_t n) {
+    const char *env = getenv("ALLGENU_TOUCH_LAYOUT");
+    if (env && *env) { snprintf(out, n, "%s", env); return true; }
+    // Android: /data/data/<pkg>/files/touch_layout.txt  (cwd suele ser la carpeta de la app)
+    snprintf(out, n, "touch_layout.txt");
+    return true;
+}
+
 static FILE *open_layout(void) {
+    char p[512];
     const char *env = getenv("ALLGENU_TOUCH_LAYOUT");
     if (env && *env) {
         FILE *f = fopen(env, "r");
         if (f) return f;
     }
-    const char *files[] = {"touch_layout.txt", "assets/touch_layout.txt", "../assets/touch_layout.txt"};
+    const char *files[] = {"touch_layout.txt", "files/touch_layout.txt", "assets/touch_layout.txt",
+                           "../assets/touch_layout.txt"};
     for (unsigned i = 0; i < sizeof files / sizeof *files; i++) {
         FILE *f = fopen(files[i], "r");
         if (f) return f;
     }
+    snprintf(p, sizeof p, "touch_layout.txt");
     return NULL;
+}
+
+static void add_zone(int kind, int btn, int stick, float x, float y, float r, float h, const char *label) {
+    if (nzones >= MAX_ZONES) return;
+    Zone *z = &zones[nzones++];
+    z->kind = kind, z->btn = btn, z->stick = stick, z->x = x, z->y = y, z->r = r, z->h = h;
+    snprintf(z->label, sizeof z->label, "%s", label ? label : "");
+}
+
+// Layout por defecto (mando Switch girado): se usa si no hay archivo.
+static void defaults(void) {
+    add_zone(Z_BUTTON, BTN_A, 0, 0.880f, 0.800f, 0.055f, 0, "A");
+    add_zone(Z_BUTTON, BTN_B, 0, 0.790f, 0.885f, 0.055f, 0, "B");
+    add_zone(Z_BUTTON, BTN_X, 0, 0.790f, 0.715f, 0.055f, 0, "X");
+    add_zone(Z_BUTTON, BTN_Y, 0, 0.700f, 0.800f, 0.055f, 0, "Y");
+    add_zone(Z_BUTTON, BTN_L, 0, 0.070f, 0.120f, 0.050f, 0, "L");
+    add_zone(Z_BUTTON, BTN_R, 0, 0.190f, 0.120f, 0.050f, 0, "R");
+    add_zone(Z_BUTTON, BTN_ZL, 0, 0.070f, 0.260f, 0.050f, 0, "ZL");
+    add_zone(Z_BUTTON, BTN_ZR, 0, 0.190f, 0.260f, 0.050f, 0, "ZR");
+    add_zone(Z_BUTTON, BTN_PLUS, 0, 0.955f, 0.550f, 0.035f, 0, "PLUS");
+    add_zone(Z_BUTTON, BTN_MINUS, 0, 0.045f, 0.550f, 0.035f, 0, "MINUS");
+    add_zone(Z_STICK, 0, 0, 0.150f, 0.760f, 0.110f, 0, "L");
+    add_zone(Z_STICK, 0, 1, 0.620f, 0.830f, 0.090f, 0, "R");
+    add_zone(Z_DPAD, 0, 0, 0.300f, 0.860f, 0.075f, 0, "D");
+}
+
+// Lee "Enabled = On/Off" de la seccion [Touch] del ini (lo escribe el menu).
+static bool ini_touch_enabled(void) {
+    const char *paths[] = {"allgenurecomp.ini", "files/allgenurecomp.ini", "../allgenurecomp.ini"};
+    for (unsigned i = 0; i < sizeof paths / sizeof *paths; i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (!f) continue;
+        char line[256];
+        bool in = false, val = true;
+        while (fgets(line, sizeof line, f)) {
+            char *s = line;
+            while (*s == ' ' || *s == '\t') s++;
+            if (*s == '[') { in = !strncmp(s + 1, "Touch", 5); continue; }
+            if (!in) continue;
+            if (!strncasecmp(s, "Enabled", 7)) {
+                char *e = strchr(s, '=');
+                if (e) val = !(strstr(e, "Off") || strstr(e, "off") || strstr(e, "0"));
+            }
+        }
+        fclose(f);
+        return val;
+    }
+    return true;
 }
 
 void android_touch_init(void) {
     const char *off = getenv("ALLGENU_TOUCH");
     if (off && (!strcmp(off, "0") || !strcmp(off, "off"))) t_visible = false;
+    else if (!ini_touch_enabled()) t_visible = false;
 
     nzones = 0;
     FILE *f = open_layout();
     char line[160];
     if (!f) {
-        SDL_Log("touch: sin touch_layout.txt, uso el layout por defecto");
-        // (layout por defecto, en el mismo formato que el archivo)
-        static const char *def[] = {
-            "button A 0.88 0.80 0.055",   "button B 0.79 0.885 0.055",
-            "button X 0.79 0.715 0.055",  "button Y 0.70 0.80 0.055",
-            "button L 0.07 0.12 0.05",    "button R 0.19 0.12 0.05",
-            "button ZL 0.07 0.26 0.05",   "button ZR 0.19 0.26 0.05",
-            "button PLUS 0.955 0.55 0.035", "button MINUS 0.88 0.55 0.035",
-            "stick L 0.15 0.74 0.105",    "stick R 0.80 0.34 0.105",
-            "dpad D 0.07 0.86 0.10",      "camera R 0.55 0.50 0.45",
-        };
-        for (unsigned i = 0; i < sizeof def / sizeof *def && nzones < MAX_ZONES; i++) {
-            Zone *z = &zones[nzones];
-            char kind[16], id[16];
-            if (sscanf(def[i], "%15s %15s %f %f %f", kind, id, &z->x, &z->y, &z->r) != 5) continue;
-            memset(z, 0, sizeof *z);
-            sscanf(def[i], "%15s %15s %f %f %f", kind, id, &z->x, &z->y, &z->r);
-            if (!strcmp(kind, "button")) {
-                z->kind = Z_BUTTON;
-                z->btn = button_bit(id);
-                snprintf(z->label, sizeof z->label, "%s", id);
-                if (z->btn < 0) continue;
-            } else if (!strcmp(kind, "stick")) {
-                z->kind = Z_STICK;
-                z->stick = (!strcmp(id, "R") || !strcmp(id, "right")) ? 1 : 0;
-            } else if (!strcmp(kind, "dpad")) {
-                z->kind = Z_DPAD;
-            } else if (!strcmp(kind, "camera")) {
-                z->kind = Z_CAMERA;
-            } else {
-                continue;
-            }
-            nzones++;
-        }
-        SDL_Log("touch: %d zonas (layout por defecto)", nzones);
+        defaults();
         return;
     }
-
-    while (fgets(line, sizeof line, f) && nzones < MAX_ZONES) {
-        char kind[16] = {0}, id[16] = {0};
+    while (fgets(line, sizeof line, f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '#' || *p == '\n' || *p == '\r' || !*p) continue;
+        char tipo[16], id[16];
         float x, y, r, h = 0;
-        char *hash = strchr(line, '#');
-        if (hash) *hash = 0;
-        if (sscanf(line, "%15s %15s %f %f %f %f", kind, id, &x, &y, &r, &h) < 5) continue;
-        Zone *z = &zones[nzones];
-        memset(z, 0, sizeof *z);
-        z->x = x, z->y = y, z->r = r, z->h = h;
-        if (!strcmp(kind, "button")) {
-            z->kind = Z_BUTTON;
-            z->btn = button_bit(id);
-            snprintf(z->label, sizeof z->label, "%s", id);
-            if (z->btn < 0) { SDL_Log("touch: boton '%s' desconocido", id); continue; }
-        } else if (!strcmp(kind, "stick")) {
-            z->kind = Z_STICK;
-            z->stick = (!strcmp(id, "R") || !strcmp(id, "right")) ? 1 : 0;
-        } else if (!strcmp(kind, "dpad")) {
-            z->kind = Z_DPAD;
-        } else if (!strcmp(kind, "camera")) {
-            z->kind = Z_CAMERA;
-        } else {
-            continue;
-        }
-        nzones++;
+        int n = sscanf(p, "%15s %15s %f %f %f %f", tipo, id, &x, &y, &r, &h);
+        if (n < 5) continue;
+        if (!strcmp(tipo, "button"))
+            add_zone(Z_BUTTON, button_bit(id), 0, x, y, r, 0, id);
+        else if (!strcmp(tipo, "stick"))
+            add_zone(Z_STICK, 0, !strcmp(id, "R"), x, y, r, 0, id);
+        else if (!strcmp(tipo, "dpad"))
+            add_zone(Z_DPAD, 0, 0, x, y, r, h > 0 ? h : r, id);
+        else if (!strcmp(tipo, "camera"))
+            add_zone(Z_CAMERA, 0, 1, x, y, r, h > 0 ? h : r, id);
     }
     fclose(f);
-    SDL_Log("touch: %d zonas cargadas", nzones);
+    if (!nzones) defaults();
 }
 
-// ---- lectura de dedos
-typedef struct { SDL_FingerID id; float x, y; } Finger;
-#define MAX_FINGERS 20
-static Finger prev[MAX_FINGERS];
-static int nprev;
-
-static void remember_fingers(SDL_Finger **f, int n) {
-    if (n > MAX_FINGERS) n = MAX_FINGERS;
-    for (int i = 0; i < n; i++) {
-        prev[i].id = f[i]->id;
-        prev[i].x = f[i]->x;
-        prev[i].y = f[i]->y;
+// Guarda el layout actual (lo llama el boton "GUARDAR" del editor).
+bool android_touch_save(void) {
+    char p[512];
+    writable_path(p, sizeof p);
+    FILE *f = fopen(p, "w");
+    if (!f) return false;
+    fprintf(f, "# AllGenURecomp: mandos tactiles (generado por el editor)\n");
+    fprintf(f, "# tipo  id  x  y  r  [h]   ->  coordenadas 0..1 sobre la pantalla\n");
+    for (int i = 0; i < nzones; i++) {
+        Zone *z = &zones[i];
+        switch (z->kind) {
+        case Z_BUTTON: fprintf(f, "button %-6s %.4f %.4f %.4f\n", z->label, z->x, z->y, z->r); break;
+        case Z_STICK: fprintf(f, "stick  %-6s %.4f %.4f %.4f\n", z->stick ? "R" : "L", z->x, z->y, z->r); break;
+        case Z_DPAD: fprintf(f, "dpad   D      %.4f %.4f %.4f %.4f\n", z->x, z->y, z->r, z->h); break;
+        case Z_CAMERA: fprintf(f, "camera R      %.4f %.4f %.4f %.4f\n", z->x, z->y, z->r, z->h); break;
+        }
     }
-    nprev = n;
+    fclose(f);
+    fprintf(stderr, "[touch] layout guardado en %s\n", p);
+    return true;
 }
+
+// ------------------------------------------------------------------ entrada
+uint64_t android_touch_buttons(void) { return t_visible ? t_buttons : 0; }
+
+void android_touch_sticks(int *lx, int *ly, int *rx, int *ry) {
+    if (!t_visible) { *lx = *ly = *rx = *ry = 0; return; }
+    *lx = t_lx, *ly = t_ly, *rx = t_rx, *ry = t_ry;
+}
+
+bool android_touch_visible(void) { return t_visible; }
+void android_touch_set_visible(bool v) { t_visible = v; }
+bool android_touch_edit(void) { return t_edit; }
+void android_touch_set_edit(bool v) { t_edit = v; }
+
+typedef struct { SDL_FingerID id; float x, y; } Finger;
+static Finger prev[16];
+static int nprev;
 
 static const Finger *find_prev(SDL_FingerID id) {
     for (int i = 0; i < nprev; i++)
@@ -198,151 +211,84 @@ static const Finger *find_prev(SDL_FingerID id) {
     return NULL;
 }
 
-// Zona bajo un dedo. `out_dist` = distancia normalizada al centro (0 = centro).
-// Prioridad: botones/sticks/dpad antes que la zona de camara (que es grande y
-// taparia los botones si se comprobara primero).
-static Zone *zone_at(float x, float y, float *out_dist) {
-    for (int pass = 0; pass < 2; pass++)
+// Zona bajo (x,y) en coordenadas normalizadas. -1 si ninguna.
+static int zone_at(float x, float y) {
     for (int i = 0; i < nzones; i++) {
         Zone *z = &zones[i];
-        if (pass == 0 && z->kind == Z_CAMERA) continue;
-        if (pass == 1 && z->kind != Z_CAMERA) continue;
-        float dx = x - z->x, dy = y - z->y;
-        if (z->kind == Z_CAMERA) {
-            if (fabsf(dx) <= z->r && fabsf(dy) <= (z->h > 0 ? z->h : z->r)) {
-                if (out_dist) *out_dist = 0;
-                return z;
-            }
-            continue;
-        }
-        if (dx * dx + dy * dy <= z->r * z->r) {
-            if (out_dist) *out_dist = sqrtf(dx * dx + dy * dy);
-            return z;
+        if (z->kind == Z_BUTTON || z->kind == Z_STICK) {
+            float dx = x - z->x, dy = y - z->y;
+            if (dx * dx + dy * dy <= z->r * z->r) return i;
+        } else {  // dpad / camera: rectangulo
+            float hw = z->r, hh = z->h > 0 ? z->h : z->r;
+            if (fabsf(x - z->x) <= hw && fabsf(y - z->y) <= hh) return i;
         }
     }
-    return NULL;
+    return -1;
 }
 
-#define STICK_DEADZONE 0.18f   // en radios del stick (evita deriva)
-#define CAMERA_SENS 2.6f       // radianes por radio recorrido
-
-// Llamado desde host_input_update() cada frame.
+// Una vez por frame: lee los dedos de SDL y actualiza botones/sticks.
 void ainput_poll(void) {
-    t_buttons = 0;
-    if (!t_visible) { t_lx = t_ly = t_rx = t_ry = 0; nprev = 0; return; }
-
-    // ejes que se van a construir este frame
-    float lx = 0, ly = 0, rx = 0, ry = 0, cam_x = 0, cam_y = 0;
+    if (!t_visible || t_edit) {  // (en el editor los dedos mueven zonas, no el juego)
+        t_buttons = 0, t_lx = t_ly = t_rx = t_ry = 0;
+        return;
+    }
+    SDL_Finger **fingers = NULL;
+    int n = SDL_GetTouchFingers(SDL_GetPrimaryDisplay(), &fingers);
     uint64_t bits = 0;
-    // zona "activa" por dedo: si un dedo empezo en el stick, sigue en el stick
-    // aunque se salga del circulo (asi se puede girar sin levantar el dedo)
-    static struct { SDL_FingerID id; int zone; } lock[MAX_FINGERS];
-    static int nlock;
-
-    int ntouch = 0;
-    SDL_TouchID *devs = SDL_GetTouchDevices(&ntouch);
-    if (!devs || ntouch == 0) { t_lx = t_ly = t_rx = t_ry = 0; return; }
-
-    int seen = 0;
-    static Finger now[MAX_FINGERS];
-    for (int d = 0; d < ntouch; d++) {
-        int nf = 0;
-        SDL_Finger **f = SDL_GetTouchFingers(devs[d], &nf);
-        for (int i = 0; i < nf && seen < MAX_FINGERS; i++) {
-            float x = f[i]->x, y = f[i]->y;
-            float dist = 0;
-            Zone *z = zone_at(x, y, &dist);
-            int zi = z ? (int)(z - zones) : -1;
-
-            // recomprobar el lock de este dedo
-            int li = -1;
-            for (int k = 0; k < nlock; k++)
-                if (lock[k].id == f[i]->id) { li = k; break; }
-            if (li < 0 && z && z->kind != Z_CAMERA && nlock < MAX_FINGERS) {
-                li = nlock++;
-                lock[li].id = f[i]->id;
-                lock[li].zone = zi;
+    int lx = 0, ly = 0, rx = 0, ry = 0;
+    int nstick = 0;
+    for (int i = 0; i < n; i++) {
+        SDL_Finger *fi = fingers[i];
+        int zi = zone_at(fi->x, fi->y);
+        if (zi < 0) continue;
+        Zone *z = &zones[zi];
+        if (z->kind == Z_BUTTON) {
+            bits |= BTN(z->btn);
+        } else if (z->kind == Z_STICK) {
+            const Finger *p = find_prev(fi->id);
+            float ox = z->x, oy = z->y;
+            float dx = (p ? p->x : fi->x) - ox, dy = (p ? p->y : fi->y) - oy;
+            // si el dedo empezo dentro, se sigue usando aunque salga del circulo
+            if (!p) { dx = 0, dy = 0; }
+            float mag = sqrtf(dx * dx + dy * dy);
+            if (mag > z->r) { dx *= z->r / mag; dy *= z->r / mag; mag = z->r; }
+            float dead = z->r * 0.18f;
+            float nx = mag > dead ? (dx / z->r) : 0.0f;
+            float ny = mag > dead ? (dy / z->r) : 0.0f;
+            if (z->stick) rx = (int)(nx * 32767.0f), ry = (int)(ny * 32767.0f);
+            else lx = (int)(nx * 32767.0f), ly = (int)(ny * 32767.0f);
+            nstick++;
+        } else if (z->kind == Z_DPAD) {
+            float dx = fi->x - z->x, dy = fi->y - z->y;
+            if (fabsf(dx) > fabsf(dy)) {
+                if (dx < -z->r * 0.15f) bits |= BTN(BTN_LEFT);
+                if (dx > z->r * 0.15f) bits |= BTN(BTN_RIGHT);
+            } else {
+                if (dy < -z->r * 0.15f) bits |= BTN(BTN_UP);
+                if (dy > z->r * 0.15f) bits |= BTN(BTN_DOWN);
             }
-            if (li >= 0) {
-                z = &zones[lock[li].zone];
-                zi = lock[li].zone;
-            }
-
-            if (z) {
-                if (z->kind == Z_BUTTON) {
-                    bits |= BTN(z->btn);
-                } else if (z->kind == Z_STICK) {
-                    float dx = (x - z->x) / z->r, dy = (y - z->y) / z->r;   // -1..1 (puede pasar de 1 si se sale)
-                    float m = sqrtf(dx * dx + dy * dy);
-                    if (m > 1) { dx /= m; dy /= m; m = 1; }
-                    if (m < STICK_DEADZONE) dx = dy = 0;
-                    int vx = (int)(dx * 32767.0f), vy = (int)(-dy * 32767.0f);  // SDL y abajo, guest y arriba
-                    if (z->stick == 0) lx = (float)vx / 32767.0f, ly = (float)vy / 32767.0f;
-                    else rx = (float)vx / 32767.0f, ry = (float)vy / 32767.0f;
-                } else if (z->kind == Z_DPAD) {
-                    // dentro del circulo del dpad: elegir la direccion dominante
-                    float dx = x - z->x, dy = y - z->y;
-                    if (fabsf(dx) > fabsf(dy))
-                        bits |= BTN(dx > 0 ? BTN_RIGHT : BTN_LEFT);
-                    else
-                        bits |= BTN(dy > 0 ? BTN_DOWN : BTN_UP);
-                } else if (z->kind == Z_CAMERA) {
-                    // arrastre relativo -> stick derecho (como el raton en PC).
-                    // Se acumula en cam_x/cam_y y se suma al final, para no
-                    // pisar un stick derecho tactil que se este usando a la vez.
-                    const Finger *p = find_prev(f[i]->id);
-                    if (p) {
-                        cam_x += -(x - p->x) * CAMERA_SENS;
-                        cam_y +=  (y - p->y) * CAMERA_SENS;
-                    }
-                }
-            }
-            now[seen++] = (Finger){f[i]->id, x, y};
         }
     }
-
-    // quitar locks de dedos levantados
-    int k = 0;
-    for (int i = 0; i < nlock; i++) {
-        bool vivo = false;
-        for (int j = 0; j < seen; j++)
-            if (now[j].id == lock[i].id) { vivo = true; break; }
-        if (vivo) lock[k++] = lock[i];
-    }
-    nlock = k;
-
-    memcpy(prev, now, sizeof(Finger) * (size_t)seen);
-    nprev = seen;
-
-    // camara: se suma al stick derecho y se recorta a [-1,1]
-    rx += cam_x, ry += cam_y;
-    if (rx > 1) rx = 1;
-    if (rx < -1) rx = -1;
-    if (ry > 1) ry = 1;
-    if (ry < -1) ry = -1;
-
-    t_buttons = bits;
-    t_lx = (int)(lx * 32767.0f);
-    t_ly = (int)(ly * 32767.0f);
-    t_rx = (int)(rx * 32767.0f);
-    t_ry = (int)(ry * 32767.0f);
+    (void)nstick;
+    // memoriza los dedos para el frame siguiente
+    nprev = 0;
+    for (int i = 0; i < n && nprev < 16; i++) prev[nprev].id = fingers[i]->id, prev[nprev].x = fingers[i]->x,
+                                          prev[nprev].y = fingers[i]->y, nprev++;
+    t_buttons = bits, t_lx = lx, t_ly = ly, t_rx = rx, t_ry = ry;
 }
 
-// ---- dibujo (lo llama el overlay ImGui)
-// Se entrega como lista plana para no meter tipos de ImGui en este archivo:
-//   x, y, r, pressed (0/1), kind, label
+// ------------------------------------------------------------------ dibujo
+// Lista plana para el overlay (ImGui): por zona 7 floats
+//   x, y, r, h, pulsada(0/1), kind, etiqueta_indice
 int android_touch_zones(float *out, int max_zones) {
     if (!t_visible) return 0;
     int n = 0;
     for (int i = 0; i < nzones && n < max_zones; i++) {
         Zone *z = &zones[i];
-        float *o = out + n * 6;
-        o[0] = z->x;
-        o[1] = z->y;
-        o[2] = z->r;
-        o[3] = (z->kind == Z_BUTTON && (t_buttons & BTN(z->btn))) ? 1.0f : 0.0f;
-        o[4] = (float)z->kind;
-        o[5] = 0;  // etiqueta aparte (ver android_touch_label)
+        float *o = out + n * 7;
+        o[0] = z->x, o[1] = z->y, o[2] = z->r * t_scale_all, o[3] = z->h * t_scale_all;
+        o[4] = (z->kind == Z_BUTTON && (t_buttons & BTN(z->btn))) ? 1.0f : 0.0f;
+        o[5] = (float)z->kind, o[6] = (float)i;
         n++;
     }
     return n;
@@ -354,5 +300,53 @@ const char *android_touch_label(int i) {
     if (z->kind == Z_BUTTON) return z->label;
     if (z->kind == Z_STICK) return z->stick ? "R" : "L";
     if (z->kind == Z_DPAD) return "D";
+    if (z->kind == Z_CAMERA) return "C";
     return "";
 }
+
+float android_touch_opacity(void) { return t_opacity; }
+int android_touch_zone_count(void) { return nzones; }
+int android_touch_selected(void) { return t_sel; }
+
+// El overlay pasa aqui los cambios que hace el usuario en el editor.
+void android_touch_set_zone(int i, float x, float y, float r) {
+    if (i < 0 || i >= nzones) return;
+    if (t_snap_grid) x = roundf(x * 100.0f) / 100.0f, y = roundf(y * 100.0f) / 100.0f;
+    if (x < 0) x = 0;
+    if (x > 1) x = 1;
+    if (y < 0) y = 0;
+    if (y > 1) y = 1;
+    zones[i].x = x, zones[i].y = y;
+    if (r > 0.005f) zones[i].r = r;
+}
+
+void android_touch_select(int i) { t_sel = (i >= 0 && i < nzones) ? i : -1; }
+
+// -------------------------------------------------------- panel del editor
+// Datos para que el overlay dibuje el panel de ajustes tactiles:
+//   [0] hay dedo (0/1)  [1] dedo x  [2] dedo y  [3] zona bajo el dedo (-1)
+//   [4] opacidad        [5] escala global       [6] iman (0/1)
+void android_touch_edit_state(float *o) {
+    o[0] = 0;
+    SDL_Finger **fingers = NULL;
+    int n = SDL_GetTouchFingers(SDL_GetPrimaryDisplay(), &fingers);
+    if (n > 0) {
+        o[0] = 1, o[1] = fingers[0]->x, o[2] = fingers[0]->y, o[3] = (float)zone_at(o[1], o[2]);
+    } else {
+        o[1] = o[2] = 0, o[3] = -1;
+    }
+    o[4] = t_opacity, o[5] = t_scale_all, o[6] = t_snap_grid ? 1.0f : 0.0f;
+}
+
+void android_touch_set_opacity(float v) {
+    if (v < 0.05f) v = 0.05f;
+    if (v > 1.0f) v = 1.0f;
+    t_opacity = v;
+}
+void android_touch_set_scale_all(float v) {
+    if (v < 0.4f) v = 0.4f;
+    if (v > 2.5f) v = 2.5f;
+    t_scale_all = v;
+}
+void android_touch_set_snap(bool on) { t_snap_grid = on; }
+void android_touch_restore_defaults(void) { nzones = 0; defaults(); t_sel = -1; }
