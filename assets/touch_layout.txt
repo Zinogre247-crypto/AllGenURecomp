@@ -1,0 +1,51 @@
+# =====================================================================
+#  Layout de los mandos tactiles de AllGenURecomp Android
+#
+#  Coordenadas NORMALIZADAS sobre la PANTALLA (0,0 = arriba-izquierda,
+#  1,1 = abajo-derecha). El telefono se usa en horizontal: x crece a la
+#  derecha y las zonas de "abajo" son el borde que queda en tu mano.
+#
+#  Formato:
+#     tipo     id     x      y      r      [h]
+#       button  A|B|X|Y|L|R|ZL|ZR|PLUS|MINUS|UP|DOWN|LEFT|RIGHT   r = radio
+#       stick   L|R                                                r = radio
+#       dpad    D                                                  r = radio
+#       camera  R   (o L)                                          r = medio ancho, h = medio alto
+#                                                     (zona de arrastre, raton -> stick derecho)
+#
+#  Reglas que aplican:
+#   - Un dedo que empieza dentro de un stick sigue controlándolo aunque se salga
+#     del circulo (para girar sin levantar el dedo).
+#   - Los botones son multitáctiles: A + stick izquierdo a la vez funciona.
+#   - Zona muerta del 18 % del radio del stick (evita deriva).
+#
+#  Para cambiar el layout: copia este archivo a
+#     /data/data/com.kriszts.allgenu/files/touch_layout.txt
+#  y reinicia la app. No hace falta recompilar.
+# =====================================================================
+
+# ---- botones de acción (derecha, como un mando Switch girado)
+button A     0.880  0.800  0.055
+button B     0.790  0.885  0.055
+button X     0.790  0.715  0.055
+button Y     0.700  0.800  0.055
+
+# ---- gatillos y bumpers
+button L     0.070  0.120  0.050
+button R     0.190  0.120  0.050
+button ZL    0.070  0.260  0.050
+button ZR    0.190  0.260  0.050
+
+# ---- start / select
+button PLUS  0.955  0.550  0.035
+button MINUS 0.880  0.550  0.035
+
+# ---- sticks
+stick L      0.150  0.740  0.105
+stick R      0.800  0.340  0.105
+
+# ---- cruceta
+dpad D       0.070  0.860  0.100
+
+# ---- camara (arrastre en la mitad derecha)
+camera R     0.550  0.500  0.450  0.450

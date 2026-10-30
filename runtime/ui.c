@@ -10,6 +10,11 @@
 #include "mods.h"
 #include "rt.h"
 
+// [AllGenU-Android] mandos tactiles
+void android_touch_init(void);
+void ainput_poll(void);
+
+
 volatile uint64_t g_present_count;
 static SDL_Window *window;
 
@@ -75,6 +80,10 @@ static void set_fullscreen(bool on) {
 
 void ui_init(void) {
     if (!SDL_Init(SDL_INIT_VIDEO)) FATAL("SDL_Init: %s\n", SDL_GetError());
+    // [AllGenU-Android] los toques son botones, no clics de raton
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+    SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+    android_touch_init();
     config_load();
     // the controller in the background (ini BackgroundInput): SDL's hint, set before its gamepads start (some of its
     // Windows input backends only read it then); keyboard and mouse events only ever reach the focused window
@@ -122,6 +131,7 @@ int ui_run(void) {
                 host_input_event(&e);
             } while (SDL_PollEvent(&e));
         }
+        ainput_poll();  // [AllGenU-Android] multitactil (una vez por frame)
         host_input_update();
         cheats_frame();
     }

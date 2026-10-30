@@ -1,0 +1,180 @@
+# =====================================================================
+#  AllGenURecomp -> APK de Android (arm64), compilado GRATIS en GitHub.
+#
+#  Caso "sin PC":
+#    - Este repo (publico) = el codigo. Actions es gratis e ilimitado.
+#    - Tu dump del juego vive en OTRO repo PRIVADO. Aqui se lee con un token.
+#    - El APK sale como artifact descargable desde el navegador del telefono.
+#
+#  Secrets a configurar UNA vez (Settings -> Secrets and variables -> Actions):
+#    DUMP_REPO     usuario/repo-privado        (ej: pepe/allgenu-dump)
+#    DUMP_TOKEN    token de solo lectura de ese repo (Contents: Read-only)
+#    KEYSTORE_B64  (opcional) keystore en base64, para firmar siempre igual
+#    KS_PASS       (opcional) clave del keystore
+#
+#  Uso: pestaña Actions -> "APK Android (arm64)" -> Run workflow.
+# =====================================================================
+name: APK Android (arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      regenerar:
+        description: "Volver a ejecutar make gen aunque ya exista generated/"
+        type: boolean
+        default: false
+  push:
+    branches: [master, main]
+    paths:
+      - 'runtime/**'
+      - 'tools/**'
+      - 'packaging/android/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compilar APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: 1) Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: 2) Preparar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 3) Instalar Android SDK + NDK
+        run: |
+          set -e
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "ndk;28.2.13676358" "build-tools;35.0.0" "platforms;android-34" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: 4) Cache de compilacion (acelera los siguientes intentos)
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: allgenu-android
+
+      - name: 5) SDL3 para Android
+        run: |
+          set -e
+          mkdir -p packaging/android/libs/arm64-v8a deps/sdl3/include
+          SDL_VER=3.4.18
+          curl -sSL -o /tmp/sdl3.zip \
+            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VER}/SDL3-devel-${SDL_VER}-android.zip"
+          unzip -q /tmp/sdl3.zip -d /tmp/sdl3pkg
+          AAR=$(find /tmp/sdl3pkg -name 'SDL3-*.aar' | head -n1)
+          unzip -q "$AAR" -d /tmp/sdl3aar
+          cp /tmp/sdl3aar/prefab/modules/SDL3-shared/libs/android.arm64-v8a/libSDL3.so \
+             packaging/android/libs/arm64-v8a/
+          cp -r /tmp/sdl3aar/prefab/modules/SDL3-Headers/include/. deps/sdl3/include/
+          if [ -f /tmp/sdl3aar/classes.jar ] && [ ! -d packaging/android/src/org/libsdl ]; then
+            mkdir -p packaging/android/src
+            unzip -q /tmp/sdl3aar/classes.jar -d packaging/android/src || true
+          fi
+          echo "SDL3_INCLUDE=$PWD/deps/sdl3/include" >> "$GITHUB_ENV"
+          ls -la packaging/android/libs/arm64-v8a/
+
+      - name: 6) Dependencias Python
+        run: pip install lz4 capstone
+
+      - name: 7) Descargar mi dump (repo privado)
+        env:
+          DUMP_REPO: ${{ secrets.DUMP_REPO }}
+          DUMP_TOKEN: ${{ secrets.DUMP_TOKEN }}
+        run: |
+          set -e
+          if [ -z "${DUMP_REPO:-}" ] || [ -z "${DUMP_TOKEN:-}" ]; then
+            echo "::warning::No hay DUMP_REPO/DUMP_TOKEN. Se compilara sin el codigo del juego."
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:${DUMP_TOKEN}@github.com/${DUMP_REPO}.git" /tmp/dump
+          mkdir -p gamedata
+          python3 tools/preparar-dump.py /tmp/dump gamedata
+          echo "--- comprobando que es v1.4.0 ---"
+          python3 tools/verificar-dump.py gamedata/exefs/main
+          rm -rf /tmp/dump
+
+      - name: 8) Traducir el juego (make gen)
+        id: gen
+        run: |
+          set -e
+          if [ ! -d gamedata/exefs ]; then
+            echo "hecho=saltado" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -d generated ] && [ -n "$(ls -A generated 2>/dev/null)" ] && [ "${{ inputs.regenerar }}" != "true" ]; then
+            echo "Ya existe generated/: no se regenera"
+            echo "hecho=existente" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          make gen GAME=gamedata -j"$(nproc)"
+          du -sh generated
+          echo "hecho=generado" >> "$GITHUB_OUTPUT"
+
+      - name: 8b) Guardar generated/ para el proximo intento
+        if: steps.gen.outputs.hecho == 'generado'
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated
+          path: generated/
+          compression-level: 0
+          retention-days: 7
+
+      - name: 9) Compilar libmain.so
+        run: |
+          set -e
+          cmake -S runtime -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSDL3_INCLUDE_DIR="$SDL3_INCLUDE"
+          cmake --build build-android --target main -j"$(nproc)"
+          cp build-android/lib/arm64-v8a/libmain.so packaging/android/libs/arm64-v8a/
+          ls -lh packaging/android/libs/arm64-v8a/
+
+      - name: 10) Crear el APK
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.KS_PASS }}
+        run: |
+          set -e
+          mkdir -p packaging/android/build
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > packaging/android/build/allgenu.keystore
+            echo "KEYSTORE=$PWD/packaging/android/build/allgenu.keystore" >> "$GITHUB_ENV"
+            echo "KS_PASS=${KS_PASS:-allgenukey}" >> "$GITHUB_ENV"
+          fi
+          chmod +x packaging/android/build_apk.sh
+          bash packaging/android/build_apk.sh
+          ls -lh packaging/android/build/*.apk
+
+      - name: 11) Subir el APK (aqui lo descargas)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AllGenURecomp-APK-arm64
+          path: packaging/android/build/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Resumen
+        run: |
+          {
+            echo "### APK listo"
+            echo ""
+            echo "Descargalo en **Artifacts -> AllGenURecomp-APK-arm64**."
+            echo "En el telefono: abre el zip, toca el .apk, instala."
+            echo ""
+            echo "Tus archivos del juego van en:"
+            echo 'Android/data/com.kriszts.allgenu/files/game/{exefs,romfs}'
+          } >> "$GITHUB_STEP_SUMMARY"

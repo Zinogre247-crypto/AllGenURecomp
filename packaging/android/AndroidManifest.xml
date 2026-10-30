@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AllGenURecomp para Android (arm64-v8a).
+  - Activity propia (AllGenUActivity) que hereda de SDLActivity.
+  - libmain.so = el runtime + codigo del juego recompilado (arm64).
+  - Nada del juego va aqui: el jugador pone su dump en
+    Android/data/com.kriszts.allgenu/files/game/{exefs,romfs}
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.kriszts.allgenu"
+    android:versionCode="1"
+    android:versionName="1.2-android">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
+
+    <!-- Red para el multijugador LAN/online (puerto 39500) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- El juego necesita leer del almacenamiento externo de la app; en Android 11+
+         Android/data/<pkg> es accesible sin permisos extra para la propia app. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- Vulkan 1.2 obligatorio y arm64 -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="false" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00400000"
+        android:required="true" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+
+    <application
+        android:label="AllGenURecomp"
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:largeHeap="true"
+        android:hasCode="true"
+        android:hardwareAccelerated="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name="com.kriszts.allgenu.AllGenUActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize|density"
+            android:resizeableActivity="false">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Mando conectado: arrancar sin pedir nada -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

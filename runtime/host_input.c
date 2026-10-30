@@ -27,6 +27,11 @@
 #include "rt.h"
 #include "textinput.h"
 
+// [AllGenU-Android] mandos tactiles (runtime/android_touch.c)
+uint64_t android_touch_buttons(void);
+void android_touch_sticks(int *lx, int *ly, int *rx, int *ry);
+
+
 #define B(x) (1ull << (x))
 
 static bool keys[SDL_SCANCODE_COUNT];
@@ -581,6 +586,16 @@ void host_input_update(void) {
         if (st->stick == 1) rx = st->x, ry = st->y;
     }
 
+
+
+    // [AllGenU-Android] botones en pantalla: se suman como un mando mas
+    {
+        int tlx = 0, tly = 0, trx = 0, try_ = 0;
+        android_touch_sticks(&tlx, &tly, &trx, &try_);
+        b |= android_touch_buttons();
+        if (tlx || tly) lx = tlx, ly = tly;
+        if (trx || try_) rx = trx, ry = try_;
+    }
     static bool menu;
     if (overlay_menu_open() != menu) {
         menu = !menu;
