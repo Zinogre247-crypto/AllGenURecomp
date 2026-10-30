@@ -223,7 +223,6 @@ jobs:
       - name: 7b) Recuperar generated/ del intento anterior (si existe)
         id: cachegen
         uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: generated
           path: generated
@@ -278,7 +277,7 @@ jobs:
       - name: 9) Compilar libmain.so
         run: |
           set -e
-          rm -rf build-android generated/shims   # (ramas viejas en el clon)
+          rm -rf build-android generated/shims
           ls runtime/hle/movie_stubs.c
           cmake -S runtime -B build-android -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
@@ -297,9 +296,40 @@ jobs:
             -DSHADERC_INCLUDE_DIR="$SHADERC_INCLUDE_DIR" \
             -DSPIRV_HEADERS_DIR="$SPIRV_HEADERS_DIR" \
             "-DGLSLANG_LIB_DIR=$GLSLANG_LIB_DIR"
-          cmake --build build-android --target main -j"$(nproc)"
+          # -k 0: ninja NO se para en el primer error: sigue y los saca TODOS de
+          # una vez (asi un solo run da la lista completa).
+          set +e
+          cmake --build build-android --target main -j"$(nproc)" -- -k 0 > /tmp/build.log 2>&1
+          rc=$?
+          set -e
+          tail -3 /tmp/build.log
+          if [ $rc -ne 0 ]; then
+            echo "================ ERRORES (resumen) ================"
+            grep -E "error:|undefined reference|FAILED:" /tmp/build.log | head -50
+            echo "==================================================="
+            {
+              echo "### Errores de compilacion (resumen)"
+              echo '```'
+              grep -E "error:|undefined reference" /tmp/build.log | head -40
+              echo '```'
+              echo ""
+              echo "Log completo: artifact **build-log**."
+            } >> "$GITHUB_STEP_SUMMARY"
+            cp /tmp/build.log build.log.txt
+            echo "::error::La compilacion fallo. Mira el resumen arriba (paso 9) o el artifact build-log."
+            exit 1
+          fi
           cp build-android/lib/arm64-v8a/libmain.so packaging/android/libs/arm64-v8a/
           ls -lh packaging/android/libs/arm64-v8a/
+
+      - name: 9b) Guardar el log de compilacion (solo si fallo)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: 10) Crear el APK
         env:

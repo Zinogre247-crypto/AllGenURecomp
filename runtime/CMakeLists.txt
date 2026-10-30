@@ -108,10 +108,15 @@ message(STATUS "SDL3: ${SDL3_LIB}")
 
 target_include_directories(main PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${IMGUI}" "${IMGUI}/imgui" "${IMGUI}/imgui/backends"
+    "${IMGUI}" "${IMGUI}/imgui" "${IMGUI}/imgui/backends")
+# Terceros como SYSTEM: sus warnings no ensucian el log (el log limpio es lo que
+# permite ver el error de verdad cuando algo falla).
+target_include_directories(main SYSTEM PRIVATE
     ${SDL3_INCLUDE_DIR}
     ${FFMPEG_INCLUDE_DIR}
-    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/vma")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/vma"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cimgui"
+    ${GLSLANG_INCLUDE_DIR} ${SHADERC_INCLUDE_DIR} ${SPIRV_HEADERS_DIR})
 
 target_compile_definitions(main PRIVATE
     __ANDROID__=1
@@ -120,7 +125,8 @@ target_compile_definitions(main PRIVATE
 
 target_compile_options(main PRIVATE
     -fPIC -O3 -ffunction-sections -fdata-sections
-    -Wno-unused-parameter -Wno-sign-compare)
+    -Wno-unused-parameter -Wno-sign-compare
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-nullability-completeness>)
 
 target_link_options(main PRIVATE
     -Wl,--gc-sections
