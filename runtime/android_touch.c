@@ -201,6 +201,30 @@ void android_touch_set_visible(bool v) { t_visible = v; }
 bool android_touch_edit(void) { return t_edit; }
 void android_touch_set_edit(bool v) { t_edit = v; }
 
+// SDL3: SDL_GetTouchFingers necesita el ID del DISPOSITIVO tactil (no el display).
+// Se toma el primero que haya; si no hay ninguno, no hay dedos.
+static SDL_TouchID touch_device(void) {
+    static SDL_TouchID cached;
+    if (cached) return cached;
+    int nd = 0;
+    SDL_TouchID *ids = SDL_GetTouchDevices(&nd);
+    if (ids && nd > 0) cached = ids[0];
+    if (ids) SDL_free(ids);
+    return cached;
+}
+
+// Devuelve los dedos activos. En SDL3 la funcion DEVUELVE el array y rellena count.
+static SDL_Finger **get_fingers(int *count) {
+    *count = 0;
+    SDL_TouchID dev = touch_device();
+    if (!dev) return NULL;
+    int n = 0;
+    SDL_Finger **f = SDL_GetTouchFingers(dev, &n);
+    if (!f) return NULL;
+    *count = n;
+    return f;
+}
+
 typedef struct { SDL_FingerID id; float x, y; } Finger;
 static Finger prev[16];
 static int nprev;
@@ -232,8 +256,8 @@ void ainput_poll(void) {
         t_buttons = 0, t_lx = t_ly = t_rx = t_ry = 0;
         return;
     }
-    SDL_Finger **fingers = NULL;
-    int n = SDL_GetTouchFingers(SDL_GetPrimaryDisplay(), &fingers);
+    int n = 0;
+    SDL_Finger **fingers = get_fingers(&n);
     uint64_t bits = 0;
     int lx = 0, ly = 0, rx = 0, ry = 0;
     int nstick = 0;
@@ -328,9 +352,9 @@ void android_touch_select(int i) { t_sel = (i >= 0 && i < nzones) ? i : -1; }
 //   [4] opacidad        [5] escala global       [6] iman (0/1)
 void android_touch_edit_state(float *o) {
     o[0] = 0;
-    SDL_Finger **fingers = NULL;
-    int n = SDL_GetTouchFingers(SDL_GetPrimaryDisplay(), &fingers);
-    if (n > 0) {
+    int n = 0;
+    SDL_Finger **fingers = get_fingers(&n);
+    if (n > 0 && fingers) {
         o[0] = 1, o[1] = fingers[0]->x, o[2] = fingers[0]->y, o[3] = (float)zone_at(o[1], o[2]);
     } else {
         o[1] = o[2] = 0, o[3] = -1;

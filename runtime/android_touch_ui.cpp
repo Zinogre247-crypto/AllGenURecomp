@@ -255,9 +255,16 @@ static void android_settings_draw(float scale) {
 // con el dedo, aqui se inyectan como raton SOLO mientras el panel esta abierto.
 static void feed_im_gui_with_fingers(void) {
     ImGuiIO &io = ImGui::GetIO();
-    SDL_Finger **f = nullptr;
-    int n = SDL_GetTouchFingers(SDL_GetPrimaryDisplay(), &f);
     static bool was_down;
+    int n = 0;
+    SDL_Finger **f = nullptr;
+    {   // SDL3: la funcion devuelve el array y rellena el contador
+        int nd = 0;
+        SDL_TouchID *ids = SDL_GetTouchDevices(&nd);
+        SDL_TouchID dev = (ids && nd > 0) ? ids[0] : 0;
+        if (ids) SDL_free(ids);
+        if (dev) f = SDL_GetTouchFingers(dev, &n);
+    }
     if (n > 0) {
         io.AddMousePosEvent(f[0]->x, f[0]->y);
         if (!was_down) io.AddMouseButtonEvent(ImGuiMouseButton_Left, true), was_down = true;
