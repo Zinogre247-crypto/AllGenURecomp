@@ -220,6 +220,14 @@ jobs:
           fi
           rm -rf /tmp/dump
 
+      - name: 7b) Recuperar generated/ del intento anterior (si existe)
+        id: cachegen
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: generated
+          path: generated
+
       - name: 8) Traducir el juego (make gen)
         id: gen
         run: |
@@ -228,8 +236,11 @@ jobs:
             echo "hecho=saltado" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ -d generated ] && [ -n "$(ls -A generated 2>/dev/null)" ] && [ "${{ inputs.regenerar }}" != "true" ]; then
-            echo "Ya existe generated/: no se regenera"
+          n_main=$(ls generated/main/*.c 2>/dev/null | wc -l)
+          n_sdk=$(ls generated/sdk/*.c 2>/dev/null | wc -l)
+          echo "generated/ del intento anterior: main=$n_main sdk=$n_sdk"
+          if [ "$n_main" -gt 0 ] && [ "$n_sdk" -gt 0 ] && [ "${{ inputs.regenerar }}" != "true" ]; then
+            echo "Reutilizo generated/ (no se vuelve a traducir)"
             echo "hecho=existente" >> "$GITHUB_OUTPUT"
             exit 0
           fi

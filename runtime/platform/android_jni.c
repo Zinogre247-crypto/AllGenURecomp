@@ -39,8 +39,13 @@ void android_show_message(const char *msg) {
 
     JNIEnv *env = NULL;
     bool attached = false;
-    if ((*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
-        if ((*g_vm)->AttachCurrentThread(g_vm, (void **)&env, NULL) != JNI_OK) return;
+    if ((*g_vm)->GetEnv(g_vm, (void **)(void *)&env, JNI_VERSION_1_6) != JNI_OK) {
+        // AttachCurrentThread espera JNIEnv**, pero el tipo real depende de la
+        // version del NDK (algunas lo declaran void**). Se pasa la direccion del
+        // puntero sin conversiones raras: (void**)&env es lo que pide el ABI.
+        JNIEnv *tmp = NULL;
+        if ((*g_vm)->AttachCurrentThread(g_vm, (void **)&tmp, NULL) != JNI_OK) return;
+        env = tmp;
         attached = true;
     }
 
