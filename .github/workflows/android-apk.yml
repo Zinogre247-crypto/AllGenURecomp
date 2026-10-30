@@ -90,23 +90,18 @@ jobs:
           echo "SDL3_INCLUDE=$PWD/deps/sdl3/include" >> "$GITHUB_ENV"
           ls -la packaging/android/libs/arm64-v8a/
 
-      - name: 6) Dependencias Python (en un entorno conocido por el Makefile)
+      - name: 6) Dependencias Python (en tools/venv, donde el Makefile las busca)
         run: |
           set -e
-          python3 -m venv .venv
-          . .venv/bin/activate
-          python -m pip install --upgrade pip
-          pip install lz4 capstone unicorn
-          # El Makefile busca tools/venv/bin/python y, si no, "python3".
-          # Un ENLACE SIMBOLICO no sirve: python3 resuelve el enlace y pierde el
-          # entorno (ModuleNotFoundError: lz4). Un lanzador con ruta absoluta si.
-          cat > tools/python3 <<EOF
-          #!/bin/sh
-          exec "$PWD/.venv/bin/python3" "\$@"
-          EOF
-          chmod +x tools/python3
-          echo "--- comprobacion (desde tools/, como hace make) ---"
-          ( cd tools && ../tools/python3 -c "import lz4, capstone, struct; print('python listo:', __import__('sys').version.split()[0], '| lz4', lz4.__version__)" )
+          # El Makefile usa:  PY := $(firstword tools/venv/bin/python ... python3)
+          # asi que el entorno TIENE que estar en tools/venv (no vale un enlace).
+          python3 -m venv tools/venv
+          tools/venv/bin/python -m pip install --upgrade pip
+          tools/venv/bin/pip install lz4 capstone unicorn
+          echo "--- comprobacion (igual que make gen) ---"
+          ( cd tools && ../tools/venv/bin/python -c "import lz4, capstone, struct; print('python listo:', __import__('sys').version.split()[0], '| lz4', lz4.__version__)" )
+          echo "--- lineas que ejecutara make ---"
+          make -n gen GAME=gamedata | head -2
 
       - name: 6b) Headers minimos de FFmpeg (para compilar movie.c y los stubs)
         run: |
@@ -235,12 +230,12 @@ jobs:
           fi
           # OJO: make gen NO va en paralelo: los dos gen.py (sdk y main) escriben
           # en el mismo arbol y se pisan. Sin -j es lento pero correcto.
-          if ! make gen GAME=gamedata PY=python3 2>&1 | tee /tmp/gen.log; then
+          if ! make gen GAME=gamedata 2>&1 | tee /tmp/gen.log; then
             grep -iE "error|Error|not found|Traceback|No module" /tmp/gen.log | tail -20 || true
             echo "::error::Fallo la traduccion del juego. Mira arriba: casi siempre es Python (modulo que falta) o falta de memoria."
             exit 1
           fi
-          du -sh generated
+          du -sh generated || true
           echo "hecho=generado" >> "$GITHUB_OUTPUT"
 
       - name: 8b) Guardar generated/ para el proximo intento
