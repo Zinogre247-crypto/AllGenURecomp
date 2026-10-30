@@ -20,7 +20,12 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#ifdef __ANDROID__
+// bionic NO tiene <execinfo.h> ni backtrace(): se usa la version de la seccion
+// plat_print_backtrace de mas abajo (___Unwind_Backtrace de libunwind de LLVM).
+#else
 #include <execinfo.h>
+#endif
 #include <sched.h>
 #include <limits.h>
 #include <signal.h>
@@ -271,9 +276,30 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
 
+#if defined(__ANDROID__)
+#include <unwind.h>  // _Unwind_Backtrace (libunwind de LLVM, en el NDK)
+// --- backtrace sin execinfo (bionic no lo tiene) -----------------------------
+// libunwind de LLVM viene en el NDK y esta enlazada en libc.so de Android.
+typedef struct {
+    void **pcs;
+    int n, max;
+} BtState;
+static _Unwind_Reason_Code bt_cb(struct _Unwind_Context *ctx, void *arg) {
+    BtState *st = (BtState *)arg;
+    uintptr_t pc = (uintptr_t)_Unwind_GetIP(ctx);
+    if (pc && st->n < st->max) st->pcs[st->n++] = (void *)pc;
+    return st->n >= st->max ? _URC_END_OF_STACK : _URC_NO_REASON;
+}
+static int android_backtrace(void **out, int max) {
+    BtState st = {out, 0, max};
+    _Unwind_Backtrace(bt_cb, &st);
+    return st.n;
+}
+#define backtrace(out, max) android_backtrace((out), (max))
+#endif
+
 void plat_print_backtrace(void) {
     void *bt[64];
-    // backtrace() existe en bionic >= 21 (libdl / libc)
     int n = backtrace(bt, 64);
     for (int i = 0; i < n; i++) {
         uint64_t pc = (uint64_t)(uintptr_t)bt[i], off = 0;
