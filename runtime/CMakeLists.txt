@@ -147,6 +147,27 @@ endif()
 # cinematicas no se reproducen (movie:: devuelve error y sigue).
 #   -DBUILD_FFMPEG_STUBS=OFF -DFFMPEG_INCLUDE_DIR=... -DFFMPEG_LIB_DIR=...
 # para tener video de verdad.
+# glslang: compila GLSL -> SPIR-V (lo usa shaderc_glslang.cpp, que suple a shaderc).
+set(GLSLANG_INCLUDE_DIR "" CACHE PATH "carpeta que contiene glslang/Public/ShaderLang.h")
+set(SHADERC_INCLUDE_DIR "" CACHE PATH "carpeta que contiene shaderc/shaderc.h")
+set(SPIRV_HEADERS_DIR "" CACHE PATH "carpeta que contiene spirv/unified1")
+set(GLSLANG_LIB_DIR "" CACHE PATH "carpeta con libglslang.a ...")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/shaderc_glslang.cpp")
+    target_sources(main PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/shaderc_glslang.cpp")
+    target_include_directories(main PRIVATE "${GLSLANG_INCLUDE_DIR}" "${SHADERC_INCLUDE_DIR}" "${SPIRV_HEADERS_DIR}")
+    if(GLSLANG_LIB_DIR)
+        target_link_directories(main PRIVATE "${GLSLANG_LIB_DIR}" "${GLSLANG_LIB_DIR}/glslang"
+                                "${GLSLANG_LIB_DIR}/glslang/OSDependent/Unix" "${GLSLANG_LIB_DIR}/SPIRV")
+        # (--start-group: estas libs se referencian entre si en cualquier orden)
+        target_link_libraries(main PRIVATE
+            -Wl,--start-group glslang SPIRV MachineIndependent OSDependent GenericCodeGen
+            glslang-default-resource-limits -Wl,--end-group)
+        message(STATUS "shaderc: glslang en ${GLSLANG_LIB_DIR}")
+    else()
+        message(FATAL_ERROR "Falta -DGLSLANG_LIB_DIR=... (libglslang.a compilada para Android)")
+    endif()
+endif()
+
 # VulkanMemoryAllocator: header-only en third_party/vma; su implementacion va en
 # un .c aparte (vma_impl.c) para que no se dupliquen simbolos.
 foreach(_vma_impl nvn/vulkan/vma_impl.cpp nvn/vulkan/vma_impl.c)
