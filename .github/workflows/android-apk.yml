@@ -133,6 +133,34 @@ jobs:
           echo "headers: $(find "$D" -name '*.h' | wc -l) archivos"
           echo "FFMPEG_INCLUDE=$D" >> "$GITHUB_ENV"
 
+      - name: 6c) Vulkan + VulkanMemoryAllocator (headers)
+        run: |
+          set -e
+          # vulkan/vulkan.h: viene en el NDK
+          echo "NDK vulkan: $(ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan/vulkan.h" 2>/dev/null || echo FALTA)"
+          # VMA: un solo header (su implementacion sale con VMA_IMPLEMENTATION)
+          mkdir -p third_party/vma
+          curl -sSL -o third_party/vma/vk_mem_alloc.h \
+            "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/master/include/vk_mem_alloc.h"
+          echo "VMA: $(wc -l < third_party/vma/vk_mem_alloc.h) lineas"
+          head -2 third_party/vma/vk_mem_alloc.h
+
+      - name: 6d) Implementacion de VMA (una sola unidad de compilacion)
+        run: |
+          set -e
+          if [ ! -f runtime/nvn/vulkan/vma_impl.cpp ]; then
+            mkdir -p runtime/nvn/vulkan
+            printf '%s\n' \
+              '// [AllGenU-Android] implementacion de VulkanMemoryAllocator.' \
+              '// vk_mem_alloc.h es header-only: la implementacion se compila UNA vez.' \
+              '// Va en .cpp porque VMA incluye <cstdint>.' \
+              '#define VMA_IMPLEMENTATION' \
+              '#define VMA_STATIC_VULKAN_FUNCTIONS 1' \
+              '#include <vk_mem_alloc.h>' \
+              > runtime/nvn/vulkan/vma_impl.cpp
+          fi
+          cat runtime/nvn/vulkan/vma_impl.cpp
+
       - name: 7) Descargar mi dump (repo privado)
         env:
           DUMP_REPO: ${{ secrets.DUMP_REPO }}

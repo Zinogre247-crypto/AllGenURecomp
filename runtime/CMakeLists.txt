@@ -110,7 +110,8 @@ target_include_directories(main PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${IMGUI}" "${IMGUI}/imgui" "${IMGUI}/imgui/backends"
     ${SDL3_INCLUDE_DIR}
-    ${FFMPEG_INCLUDE_DIR})
+    ${FFMPEG_INCLUDE_DIR}
+    "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/vma")
 
 target_compile_definitions(main PRIVATE
     __ANDROID__=1
@@ -146,6 +147,15 @@ endif()
 # cinematicas no se reproducen (movie:: devuelve error y sigue).
 #   -DBUILD_FFMPEG_STUBS=OFF -DFFMPEG_INCLUDE_DIR=... -DFFMPEG_LIB_DIR=...
 # para tener video de verdad.
+# VulkanMemoryAllocator: header-only en third_party/vma; su implementacion va en
+# un .c aparte (vma_impl.c) para que no se dupliquen simbolos.
+foreach(_vma_impl nvn/vulkan/vma_impl.cpp nvn/vulkan/vma_impl.c)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_vma_impl}")
+        target_sources(main PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/${_vma_impl}")
+        message(STATUS "VMA: ${_vma_impl}")
+    endif()
+endforeach()
+
 option(BUILD_FFMPEG_STUBS "usar stubs de FFmpeg (sin cinematicas)" ON)
 
 if(BUILD_FFMPEG_STUBS)
