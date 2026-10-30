@@ -106,7 +106,16 @@ if(NOT SDL3_LIB)
 endif()
 message(STATUS "SDL3: ${SDL3_LIB}")
 
+# El codigo generado de subsdk0 incluye "subsdk0/runtime/hle/hle.h": se crea un
+# prefijo que apunta a runtime/ para que resuelva.
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/geninc/subsdk0")
+if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/geninc/subsdk0/runtime")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E create_symlink
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/geninc/subsdk0/runtime")
+endif()
+
 target_include_directories(main PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/geninc"
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${IMGUI}" "${IMGUI}/imgui" "${IMGUI}/imgui/backends")
 # Terceros como SYSTEM: sus warnings no ensucian el log (el log limpio es lo que

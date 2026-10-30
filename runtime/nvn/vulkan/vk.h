@@ -13,6 +13,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan.h>
+// VMA puede arrastrar prototipos de Vulkan 1.3 que no existen en Android 29
+// (vkGetDeviceBufferMemoryRequirements / vkGetDeviceImageMemoryRequirements).
+// Con las funciones estaticas a 0, VMA no los referencia: el juego usa Vulkan 1.2.
+#ifndef VMA_STATIC_VULKAN_FUNCTIONS
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#endif
+#ifndef VMA_DYNAMIC_VULKAN_FUNCTIONS
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+#endif
 #if __has_include(<vma/vk_mem_alloc.h>)
 #include <vma/vk_mem_alloc.h>
 #else

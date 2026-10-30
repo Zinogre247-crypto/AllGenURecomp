@@ -27,6 +27,10 @@
 #include <SPIRV/GlslangToSpv.h>
 
 
+// La API de shaderc es C: si no se declara asi, C++ la "manglea" y el enlazador
+// no encuentra simbolos como shaderc_compile_options_set_target_env.
+extern "C" {
+
 // ------------------------------------------------------------------ tipos
 struct shaderc_compiler {
     int inited;  // glslang_initialize_process() hecho
@@ -83,10 +87,10 @@ shaderc_compile_options_t shaderc_compile_options_clone(const shaderc_compile_op
 void shaderc_compile_options_release(shaderc_compile_options_t o) { free(o); }
 
 void shaderc_compile_options_set_target_env(shaderc_compile_options_t o, shaderc_target_env env,
-                                           shaderc_env_version v) {
+                                           uint32_t v) {
     if (!o) return;
     o->env = env;
-    o->env_version = v;
+    o->env_version = (shaderc_env_version)v;
 }
 
 void shaderc_compile_options_set_optimization_level(shaderc_compile_options_t o, shaderc_optimization_level l) {
@@ -191,3 +195,5 @@ void shaderc_result_release(shaderc_compilation_result_t r) {
     free(r->bytes);
     free(r);
 }
+
+}  // extern "C"
