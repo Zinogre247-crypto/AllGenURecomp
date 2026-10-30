@@ -189,11 +189,21 @@ jobs:
             echo "::warning::No hay DUMP_REPO/DUMP_TOKEN. Se compilara sin el codigo del juego."
             exit 0
           fi
-          git clone --depth 1 "https://x-access-token:${DUMP_TOKEN}@github.com/${DUMP_REPO}.git" /tmp/dump
+          if ! git clone --depth 1 "https://x-access-token:${DUMP_TOKEN}@github.com/${DUMP_REPO}.git" /tmp/dump; then
+            echo "::error::No pude clonar ${DUMP_REPO}. Revisa: el repo existe y esta en privado, DUMP_REPO esta escrito usuario/repo, y el token tiene Contents: Read-only sobre ESE repo."
+            exit 1
+          fi
+          ls -la /tmp/dump | head -20
           mkdir -p gamedata
-          python3 tools/preparar-dump.py /tmp/dump gamedata
+          if ! python3 tools/preparar-dump.py /tmp/dump gamedata; then
+            echo "::error::Tu repo privado no tiene un exefs valido. Sube exefs.zip (con la carpeta exefs/ dentro) a la raiz de ${DUMP_REPO}."
+            exit 1
+          fi
           echo "--- comprobando que es v1.4.0 ---"
-          python3 tools/verificar-dump.py gamedata/exefs/main
+          if ! python3 tools/verificar-dump.py gamedata/exefs/main; then
+            echo "::error::Ese dump no es Monster Hunter Generations Ultimate v1.4.0. Reextrae el juego con la actualizacion 1.4.0."
+            exit 1
+          fi
           rm -rf /tmp/dump
 
       - name: 8) Traducir el juego (make gen)
