@@ -25,10 +25,9 @@ on:
         default: false
   push:
     branches: [master, main]
-    paths:
-      - 'runtime/**'
-      - 'tools/**'
-      - 'packaging/android/**'
+    # (sin filtro de rutas: cualquier push lanza la compilacion. Antes filtraba
+    #  por runtime/**, tools/** y packaging/, y un commit que solo cambiaba este
+    #  mismo archivo NO disparaba nada.)
 
 permissions:
   contents: read
@@ -98,8 +97,16 @@ jobs:
           . .venv/bin/activate
           python -m pip install --upgrade pip
           pip install lz4 capstone unicorn
-          ln -sf "$PWD/.venv/bin/python3" tools/python3
-          tools/python3 -c "import lz4, capstone; print('python listo:', __import__('sys').version.split()[0])"
+          # El Makefile busca tools/venv/bin/python y, si no, "python3".
+          # Un ENLACE SIMBOLICO no sirve: python3 resuelve el enlace y pierde el
+          # entorno (ModuleNotFoundError: lz4). Un lanzador con ruta absoluta si.
+          cat > tools/python3 <<EOF
+          #!/bin/sh
+          exec "$PWD/.venv/bin/python3" "\$@"
+          EOF
+          chmod +x tools/python3
+          echo "--- comprobacion (desde tools/, como hace make) ---"
+          ( cd tools && ../tools/python3 -c "import lz4, capstone, struct; print('python listo:', __import__('sys').version.split()[0], '| lz4', lz4.__version__)" )
 
       - name: 6b) Headers minimos de FFmpeg (para compilar movie.c y los stubs)
         run: |
