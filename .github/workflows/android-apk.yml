@@ -73,22 +73,30 @@ jobs:
       - name: 5) SDL3 para Android
         run: |
           set -e
-          mkdir -p packaging/android/libs/arm64-v8a deps/sdl3/include
           SDL_VER=3.4.18
+          mkdir -p deps/sdl3/include packaging/android/libs/arm64-v8a
           curl -sSL -o /tmp/sdl3.zip \
             "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VER}/SDL3-devel-${SDL_VER}-android.zip"
-          unzip -q /tmp/sdl3.zip -d /tmp/sdl3pkg
-          AAR=$(find /tmp/sdl3pkg -name 'SDL3-*.aar' | head -n1)
-          unzip -q "$AAR" -d /tmp/sdl3aar
-          cp /tmp/sdl3aar/prefab/modules/SDL3-shared/libs/android.arm64-v8a/libSDL3.so \
-             packaging/android/libs/arm64-v8a/
-          cp -r /tmp/sdl3aar/prefab/modules/SDL3-Headers/include/. deps/sdl3/include/
-          if [ -f /tmp/sdl3aar/classes.jar ] && [ ! -d packaging/android/src/org/libsdl ]; then
-            mkdir -p packaging/android/src
-            unzip -q /tmp/sdl3aar/classes.jar -d packaging/android/src || true
-          fi
-          echo "SDL3_INCLUDE=$PWD/deps/sdl3/include" >> "$GITHUB_ENV"
+          rm -rf /tmp/sdl3pkg /tmp/sdl3aar
+          unzip -qo /tmp/sdl3.zip -d /tmp/sdl3pkg
+          AAR=$(find /tmp/sdl3pkg -name '*.aar' | head -n1)
+          echo "aar: $AAR"
+          unzip -qo "$AAR" -d /tmp/sdl3aar
+          echo "--- contenido del prefab (libs reales) ---"
+          find /tmp/sdl3aar/prefab -name '*.so' -o -name '*.a' | head -20
+          # copiar TODAS las variantes: los nombres cambian entre versiones
+          # (libSDL3.so, libSDL3_shared.so, libSDL3.so.0 ...). CMake busca cualquiera.
+          mkdir -p packaging/android/libs/arm64-v8a
+          find /tmp/sdl3aar/prefab -path '*arm64-v8a*' -name 'libSDL3*.so*' \
+            -exec cp -Lv {} packaging/android/libs/arm64-v8a/ \;
+          cp -r /tmp/sdl3aar/prefab/modules/SDL3-Headers/include/. deps/sdl3/include/ || \
+            cp -r /tmp/sdl3aar/prefab/modules/*/include/. deps/sdl3/include/
           ls -la packaging/android/libs/arm64-v8a/
+          test -f packaging/android/libs/arm64-v8a/libSDL3.so || \
+            test -f packaging/android/libs/arm64-v8a/libSDL3_shared.so || \
+            { echo "::error::El .aar de SDL3 no trajo ninguna libSDL3*.so para arm64-v8a"; exit 1; }
+          echo "SDL3_INCLUDE=$PWD/deps/sdl3/include" >> "$GITHUB_ENV"
+          echo "SDL3_LIB_DIR=$PWD/packaging/android/libs/arm64-v8a" >> "$GITHUB_ENV"
 
       - name: 6) Dependencias Python (en tools/venv, donde el Makefile las busca)
         run: |
@@ -262,6 +270,8 @@ jobs:
       - name: 9) Compilar libmain.so
         run: |
           set -e
+          rm -rf build-android generated/shims   # (ramas viejas en el clon)
+          ls runtime/hle/movie_stubs.c
           cmake -S runtime -B build-android -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
@@ -270,6 +280,9 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DSDL3_INCLUDE_DIR="$SDL3_INCLUDE" \
+            -DSDL3_LIB="$SDL3_LIB_DIR/libSDL3.so" \
+            "-DCMAKE_EXE_LINKER_FLAGS=-L$SDL3_LIB_DIR" \
+            "-DCMAKE_SHARED_LINKER_FLAGS=-L$SDL3_LIB_DIR" \
             -DFFMPEG_INCLUDE_DIR="$FFMPEG_INCLUDE" \
             -DBUILD_FFMPEG_STUBS=ON
           cmake --build build-android --target main -j"$(nproc)"

@@ -94,7 +94,17 @@ set_source_files_properties(${GEN_C} PROPERTIES COMPILE_OPTIONS
 # SDL3: el NDK no lo trae. Se pasa la carpeta include (del .aar de SDL) por
 # -DSDL3_INCLUDE_DIR=... y se enlaza contra el libSDL3.so prebuilt.
 set(SDL3_INCLUDE_DIR "" CACHE PATH "include de SDL3 (prefab/modules/SDL3-Headers/include)")
-find_library(SDL3_LIB NAMES SDL3 PATHS "${CMAKE_SOURCE_DIR}/../packaging/android/libs/${ANDROID_ABI}" NO_DEFAULT_PATH)
+set(SDL3_LIB_DIR "" CACHE PATH "carpeta que contiene libSDL3.so")
+find_library(SDL3_LIB NAMES SDL3 SDL3_shared libSDL3
+    PATHS "${SDL3_LIB_DIR}"
+          "${CMAKE_SOURCE_DIR}/packaging/android/libs/${ANDROID_ABI}"
+          "${CMAKE_SOURCE_DIR}/../packaging/android/libs/${ANDROID_ABI}"
+    NO_DEFAULT_PATH)
+if(NOT SDL3_LIB)
+    message(FATAL_ERROR "No encuentro libSDL3.so. Pasa -DSDL3_LIB=/ruta/libSDL3.so "
+                        "(o -DSDL3_LIB_DIR=carpeta). Contenido esperado en packaging/android/libs/${ANDROID_ABI}")
+endif()
+message(STATUS "SDL3: ${SDL3_LIB}")
 
 target_include_directories(main PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -139,6 +149,10 @@ endif()
 option(BUILD_FFMPEG_STUBS "usar stubs de FFmpeg (sin cinematicas)" ON)
 
 if(BUILD_FFMPEG_STUBS)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/hle/movie_stubs.c")
+        message(FATAL_ERROR "Falta runtime/hle/movie_stubs.c (lo copia apply-patch.sh). "
+                            "Si quieres video real: -DBUILD_FFMPEG_STUBS=OFF con FFmpeg compilado.")
+    endif()
     target_sources(main PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/hle/movie_stubs.c")
     if(FFMPEG_INCLUDE_DIR)
         target_include_directories(main PRIVATE "${FFMPEG_INCLUDE_DIR}")
