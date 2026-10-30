@@ -31,6 +31,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
@@ -221,11 +222,31 @@ jobs:
           rm -rf /tmp/dump
 
       - name: 7b) Recuperar generated/ del intento anterior (si existe)
-        id: cachegen
-        uses: actions/download-artifact@v4
-        with:
-          name: generated
-          path: generated
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # OJO: download-artifact FALLA si el artifact no existe, y eso tumbaba el
+          # run entero. Aqui se pregunta primero con la API: si no hay, se sigue
+          # normal y se traduce.
+          set -e
+          mkdir -p generated
+          repo="${{ github.repository }}"
+          id=$(gh api "repos/$repo/actions/artifacts?name=generated&per_page=1" \
+                --jq '.artifacts[0].id // empty' 2>/dev/null || true)
+          if [ -z "$id" ]; then
+            echo "No hay artifact 'generated' todavia: se traducira el juego (1-4 h)."
+            exit 0
+          fi
+          exp=$(gh api "repos/$repo/actions/artifacts/$id" --jq '.expired' 2>/dev/null || echo true)
+          if [ "$exp" = "true" ]; then
+            echo "El artifact 'generated' ($id) caduco: se traducira otra vez."
+            exit 0
+          fi
+          echo "Descargando artifact 'generated' (id $id)..."
+          gh api "repos/$repo/actions/artifacts/$id/zip" > /tmp/gen.zip
+          ls -lh /tmp/gen.zip
+          unzip -qo /tmp/gen.zip -d generated
+          echo "generated/: $(find generated -name '*.c' | wc -l) archivos .c recuperados"
 
       - name: 8) Traducir el juego (make gen)
         id: gen
