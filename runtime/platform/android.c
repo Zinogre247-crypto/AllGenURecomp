@@ -57,23 +57,16 @@ void android_log_error(const char *fmt, ...);
 void android_show_message(const char *msg);
 void android_status(const char *msg);
 
-// [AllGenU-Android] Trampa para fallos MUY tempranos: __cxa_guard_abort lo llama
-// el C++ cuando una variable static de una funcion se esta inicializando y algo
-// dentro aborta. Con -fno-exceptions eso pasa, entre otros sitios, en los static
-// del ShaderCompiler de shaderc, y el sintoma es justo una PANTALLA NEGRA sin
-// nada en el log. Con esto, el fallo se ve en pantalla y en diagnostico.txt.
-// (visibility protected: asi esta version no la puede sustituir la de libc++)
-__attribute__((visibility("protected")))
-void __cxa_guard_abort(void *g) {
-    (void)g;
-    android_log_error("FALLO inicializando una variable static (__cxa_guard_abort)");
-    android_show_message("Fallo al inicializar una parte del motor "
-                         "(compilador de shaders).\n\n"
-                         "El detalle queda en files/diagnostico.txt");
-    _exit(70);
+// [AllGenU-Android] abort() con explicacion en pantalla.
+// Hay fallos del C++ (una variable static, una excepcion sin capturar) que
+// terminan en abort() sin decir nada: pantalla negra y a correr. Con abort()
+// interceptado, al menos queda escrito QUE paso, en pantalla y en el log.
+static void android_fatal_hint(void) {
+    android_log_error("La app aborto (abort). Ultimas lineas del log.txt:");
+    android_status("ERROR: la app aborto. Mira Download/AllGenU-log.txt");
 }
 
-// La ruta de datos de la app la pone android_jni.c (JNI_OnLoad / SDL_main).
+// La ruta de datos de la app la pone android_jni.c (JNI_OnLoad / SDL_main). (JNI_OnLoad / SDL_main).
 // Si esta vacia se cae a "." (util para pruebas en el telefono con adb shell).
 char g_android_app_dir[PATH_MAX] = "";
 
@@ -370,6 +363,14 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
     _exit(139);  // (rt_fault_report no vuelve)
 }
 
+// abort() no da direccion util, pero si el hecho: casi siempre es una variable
+// static que no se pudo inicializar (C++ sin excepciones) o un assert().
+static void abort_handler(int sig, siginfo_t *si, void *uc) {
+    (void)sig; (void)si; (void)uc;
+    android_fatal_hint();
+    _exit(134);
+}
+
 void plat_crash_handler_install(void) {
     static char altstack[256 * 1024] __attribute__((aligned(16)));
     stack_t ss = {.ss_sp = altstack, .ss_size = sizeof altstack}, old;
@@ -379,4 +380,9 @@ void plat_crash_handler_install(void) {
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigaction(SIGFPE, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
+    // [AllGenU-Android] abort()/assert(): dejar constancia y salir sin colgarse
+    struct sigaction ab = {0};
+    ab.sa_sigaction = abort_handler;
+    ab.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGABRT, &ab, NULL);
 }
