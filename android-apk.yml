@@ -1,0 +1,392 @@
+# =====================================================================
+#  AllGenURecomp -> APK de Android (arm64), compilado GRATIS en GitHub.
+#
+#  Caso "sin PC":
+#    - Este repo (publico) = el codigo. Actions es gratis e ilimitado.
+#    - Tu dump del juego vive en OTRO repo PRIVADO. Aqui se lee con un token.
+#    - El APK sale como artifact descargable desde el navegador del telefono.
+#
+#  Secrets a configurar UNA vez (Settings -> Secrets and variables -> Actions):
+#    DUMP_REPO     usuario/repo-privado        (ej: pepe/allgenu-dump)
+#    DUMP_TOKEN    token de solo lectura de ese repo (Contents: Read-only)
+#    KEYSTORE_B64  (opcional) keystore en base64, para firmar siempre igual
+#    KS_PASS       (opcional) clave del keystore
+#
+#  Uso: pestaña Actions -> "APK Android (arm64)" -> Run workflow.
+# =====================================================================
+name: APK Android (arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      regenerar:
+        description: "Volver a ejecutar make gen aunque ya exista generated/"
+        type: boolean
+        default: false
+  push:
+    branches: [master, main]
+    # (sin filtro de rutas: cualquier push lanza la compilacion. Antes filtraba
+    #  por runtime/**, tools/** y packaging/, y un commit que solo cambiaba este
+    #  mismo archivo NO disparaba nada.)
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Compilar APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: 1) Descargar el codigo
+        uses: actions/checkout@v4
+
+      - name: 1b) Traer del repo original los archivos que no esten en mi fork
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/krisztsa/AllGenURecomp.git /tmp/upstream
+          # solo rellena huecos: no pisa nada de lo tuyo (el parche Android manda)
+          rsync -a --ignore-existing /tmp/upstream/ ./ --exclude '.git'
+          echo "runtime/ archivos C: $(ls runtime/*.c 2>/dev/null | wc -l)"
+          echo "third_party/cimgui/imgui: $(ls third_party/cimgui/imgui/imgui.cpp 2>/dev/null || echo FALTA)"
+
+      - name: 2) Preparar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 3) Instalar Android SDK + NDK
+        run: |
+          set -e
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "ndk;28.2.13676358" "build-tools;35.0.0" "platforms;android-34" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: 4) Cache de compilacion (acelera los siguientes intentos)
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: allgenu-android
+
+      - name: 5) SDL3 para Android
+        run: |
+          set -e
+          SDL_VER=3.4.18
+          mkdir -p deps/sdl3/include packaging/android/libs/arm64-v8a
+          curl -sSL -o /tmp/sdl3.zip \
+            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VER}/SDL3-devel-${SDL_VER}-android.zip"
+          rm -rf /tmp/sdl3pkg /tmp/sdl3aar
+          unzip -qo /tmp/sdl3.zip -d /tmp/sdl3pkg
+          AAR=$(find /tmp/sdl3pkg -name '*.aar' | head -n1)
+          echo "aar: $AAR"
+          unzip -qo "$AAR" -d /tmp/sdl3aar
+          echo "--- contenido del prefab (libs reales) ---"
+          find /tmp/sdl3aar/prefab -name '*.so' -o -name '*.a' | head -20
+          # copiar TODAS las variantes: los nombres cambian entre versiones
+          # (libSDL3.so, libSDL3_shared.so, libSDL3.so.0 ...). CMake busca cualquiera.
+          mkdir -p packaging/android/libs/arm64-v8a
+          find /tmp/sdl3aar/prefab -path '*arm64-v8a*' -name 'libSDL3*.so*' \
+            -exec cp -Lv {} packaging/android/libs/arm64-v8a/ \;
+          cp -r /tmp/sdl3aar/prefab/modules/SDL3-Headers/include/. deps/sdl3/include/ || \
+            cp -r /tmp/sdl3aar/prefab/modules/*/include/. deps/sdl3/include/
+          ls -la packaging/android/libs/arm64-v8a/
+          test -f packaging/android/libs/arm64-v8a/libSDL3.so || \
+            test -f packaging/android/libs/arm64-v8a/libSDL3_shared.so || \
+            { echo "::error::El .aar de SDL3 no trajo ninguna libSDL3*.so para arm64-v8a"; exit 1; }
+          echo "SDL3_INCLUDE=$PWD/deps/sdl3/include" >> "$GITHUB_ENV"
+          echo "SDL3_LIB_DIR=$PWD/packaging/android/libs/arm64-v8a" >> "$GITHUB_ENV"
+
+      - name: 6) Dependencias Python (en tools/venv, donde el Makefile las busca)
+        run: |
+          set -e
+          # El Makefile usa:  PY := $(firstword tools/venv/bin/python ... python3)
+          # asi que el entorno TIENE que estar en tools/venv (no vale un enlace).
+          python3 -m venv tools/venv
+          tools/venv/bin/python -m pip install --upgrade pip
+          tools/venv/bin/pip install lz4 capstone unicorn
+          echo "--- comprobacion (igual que make gen) ---"
+          ( cd tools && ../tools/venv/bin/python -c "import lz4, capstone, struct; print('python listo:', __import__('sys').version.split()[0], '| lz4', lz4.__version__)" )
+          echo "--- lineas que ejecutara make ---"
+          make -n gen GAME=gamedata | head -2
+
+      - name: 6b) Headers de FFmpeg (se compilan los stubs; sin cinematicas)
+        run: |
+          set -e
+          # Headers REALES de FFmpeg (no se compila FFmpeg: solo hacen falta las
+          # declaraciones). Son independientes de la arquitectura.
+          FF_VER=7.1
+          curl -sSL -o /tmp/ff.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FF_VER}.tar.xz"
+          ls -lh /tmp/ff.tar.xz
+          tar xf /tmp/ff.tar.xz -C /tmp
+          D="$PWD/deps/ffmpeg-stub/include"
+          mkdir -p "$D"
+          for m in libavutil libavcodec libavformat libswresample; do
+            mkdir -p "$D/$m"
+            cp /tmp/ffmpeg-${FF_VER}/$m/*.h "$D/$m/" 2>/dev/null || true
+          done
+          # avconfig.h lo genera el configure de FFmpeg; estos valores valen en arm64
+          printf '%s\n' '#ifndef AVUTIL_AVCONFIG_H' '#define AVUTIL_AVCONFIG_H' \
+            '#define AV_HAVE_BIGENDIAN 0' '#define AV_HAVE_FAST_UNALIGNED 1' '#endif' \
+            > "$D/libavutil/avconfig.h"
+          echo "headers: $(find "$D" -name '*.h' | wc -l) archivos"
+          echo "FFMPEG_INCLUDE=$D" >> "$GITHUB_ENV"
+
+      - name: 6c) Vulkan + VulkanMemoryAllocator (headers)
+        run: |
+          set -e
+          # vulkan/vulkan.h: viene en el NDK
+          echo "NDK vulkan: $(ls "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan/vulkan.h" 2>/dev/null || echo FALTA)"
+          # VMA: un solo header (su implementacion sale con VMA_IMPLEMENTATION)
+          mkdir -p third_party/vma
+          curl -sSL -o third_party/vma/vk_mem_alloc.h \
+            "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/master/include/vk_mem_alloc.h"
+          echo "VMA: $(wc -l < third_party/vma/vk_mem_alloc.h) lineas"
+          head -2 third_party/vma/vk_mem_alloc.h
+
+      - name: 6e) shaderc + glslang (GLSL -> SPIR-V, compilado para Android)
+        run: |
+          set -e
+          GLSLANG_VER=15.0.0
+          # headers de shaderc (la API que usa runtime/nvn/vulkan/shaders.c)
+          mkdir -p deps/shaderc/include/shaderc
+          for f in shaderc.h env.h status.h visibility.h; do
+            curl -sSL -o "deps/shaderc/include/shaderc/$f" \
+              "https://raw.githubusercontent.com/google/shaderc/main/libshaderc/include/shaderc/$f"
+          done
+          # glslang (el compilador de verdad)
+          git clone --depth 1 -b ${GLSLANG_VER} https://github.com/KhronosGroup/glslang.git deps/glslang
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git deps/spirv-headers
+          # glslang espera los headers de SPIRV en esta ruta cuando no usa submodulos
+          mkdir -p deps/glslang/External/spirv-tools/external
+          cp -r deps/spirv-headers deps/glslang/External/spirv-tools/external/spirv-headers
+          echo "--- compilando glslang para arm64 (3-5 min) ---"
+          cmake -S deps/glslang -B build-glslang -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DENABLE_OPT=OFF -DENABLE_HLSL=OFF -DBUILD_TESTING=OFF -DENABLE_CTEST=OFF \
+            -DBUILD_EXTERNAL=OFF -DENABLE_GLSLANG_BINARIES=OFF
+          cmake --build build-glslang --target glslang SPIRV MachineIndependent OSDependent GenericCodeGen \
+            glslang-default-resource-limits -j"$(nproc)"
+          find build-glslang -name 'libglslang*.a' -o -name 'libSPIRV*.a' -o -name 'libMachineIndependent*.a' \
+            -o -name 'libOSDependent*.a' -o -name 'libGenericCodeGen*.a' | head -10
+          echo "GLSLANG_INCLUDE_DIR=$PWD/deps/glslang" >> "$GITHUB_ENV"
+          echo "SHADERC_INCLUDE_DIR=$PWD/deps/shaderc/include" >> "$GITHUB_ENV"
+          echo "SPIRV_HEADERS_DIR=$PWD/deps/spirv-headers/include" >> "$GITHUB_ENV"
+          echo "GLSLANG_LIB_DIR=$PWD/build-glslang" >> "$GITHUB_ENV"
+
+      - name: 6d) Implementacion de VMA (una sola unidad de compilacion)
+        run: |
+          set -e
+          if [ ! -f runtime/nvn/vulkan/vma_impl.cpp ]; then
+            mkdir -p runtime/nvn/vulkan
+            printf '%s\n' \
+              '// [AllGenU-Android] implementacion de VulkanMemoryAllocator.' \
+              '// vk_mem_alloc.h es header-only: la implementacion se compila UNA vez.' \
+              '// Va en .cpp porque VMA incluye <cstdint>.' \
+              '#define VMA_IMPLEMENTATION' \
+              '#define VMA_STATIC_VULKAN_FUNCTIONS 1' \
+              '#include <vk_mem_alloc.h>' \
+              > runtime/nvn/vulkan/vma_impl.cpp
+          fi
+          cat runtime/nvn/vulkan/vma_impl.cpp
+
+      - name: 7) Descargar mi dump (repo privado)
+        env:
+          DUMP_REPO: ${{ secrets.DUMP_REPO }}
+          DUMP_TOKEN: ${{ secrets.DUMP_TOKEN }}
+        run: |
+          set -e
+          if [ -z "${DUMP_REPO:-}" ] || [ -z "${DUMP_TOKEN:-}" ]; then
+            echo "::warning::No hay DUMP_REPO/DUMP_TOKEN. Se compilara sin el codigo del juego."
+            exit 0
+          fi
+          if ! git clone --depth 1 "https://x-access-token:${DUMP_TOKEN}@github.com/${DUMP_REPO}.git" /tmp/dump; then
+            echo "::error::No pude clonar ${DUMP_REPO}. Revisa: el repo existe y esta en privado, DUMP_REPO esta escrito usuario/repo, y el token tiene Contents: Read-only sobre ESE repo."
+            exit 1
+          fi
+          ls -la /tmp/dump | head -20
+          mkdir -p gamedata
+          if ! python3 tools/preparar-dump.py /tmp/dump gamedata; then
+            echo "::error::Tu repo privado no tiene un exefs valido. Sube exefs.zip (con la carpeta exefs/ dentro) a la raiz de ${DUMP_REPO}."
+            exit 1
+          fi
+          echo "--- comprobando que es v1.4.0 ---"
+          if ! python3 tools/verificar-dump.py gamedata/exefs/main; then
+            echo "::error::Ese dump no es Monster Hunter Generations Ultimate v1.4.0. Reextrae el juego con la actualizacion 1.4.0."
+            exit 1
+          fi
+          rm -rf /tmp/dump
+
+      - name: 7b) Recuperar generated/ del intento anterior (si existe)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # OJO: download-artifact FALLA si el artifact no existe, y eso tumbaba el
+          # run entero. Aqui se pregunta primero con la API: si no hay, se sigue
+          # normal y se traduce.
+          set -e
+          mkdir -p generated
+          repo="${{ github.repository }}"
+          id=$(gh api "repos/$repo/actions/artifacts?name=generated&per_page=1" \
+                --jq '.artifacts[0].id // empty' 2>/dev/null || true)
+          if [ -z "$id" ]; then
+            echo "No hay artifact 'generated' todavia: se traducira el juego (1-4 h)."
+            exit 0
+          fi
+          exp=$(gh api "repos/$repo/actions/artifacts/$id" --jq '.expired' 2>/dev/null || echo true)
+          if [ "$exp" = "true" ]; then
+            echo "El artifact 'generated' ($id) caduco: se traducira otra vez."
+            exit 0
+          fi
+          echo "Descargando artifact 'generated' (id $id)..."
+          gh api "repos/$repo/actions/artifacts/$id/zip" > /tmp/gen.zip
+          ls -lh /tmp/gen.zip
+          unzip -qo /tmp/gen.zip -d generated
+          echo "generated/: $(find generated -name '*.c' | wc -l) archivos .c recuperados"
+
+      - name: 8) Traducir el juego (make gen)
+        id: gen
+        run: |
+          set -e
+          if [ ! -d gamedata/exefs ]; then
+            echo "hecho=saltado" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n_main=$(ls generated/main/*.c 2>/dev/null | wc -l)
+          n_sdk=$(ls generated/sdk/*.c 2>/dev/null | wc -l)
+          echo "generated/ del intento anterior: main=$n_main sdk=$n_sdk"
+          if [ "$n_main" -gt 0 ] && [ "$n_sdk" -gt 0 ] && [ "${{ inputs.regenerar }}" != "true" ]; then
+            echo "Reutilizo generated/ (no se vuelve a traducir)"
+            echo "hecho=existente" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # OJO: make gen NO va en paralelo: los dos gen.py (sdk y main) escriben
+          # en el mismo arbol y se pisan. Sin -j es lento pero correcto.
+          if ! make gen GAME=gamedata 2>&1 | tee /tmp/gen.log; then
+            grep -iE "error|Error|not found|Traceback|No module" /tmp/gen.log | tail -20 || true
+            echo "::error::Fallo la traduccion del juego. Mira arriba: casi siempre es Python (modulo que falta) o falta de memoria."
+            exit 1
+          fi
+          du -sh generated || true
+          echo "hecho=generado" >> "$GITHUB_OUTPUT"
+
+      - name: 8b) Guardar generated/ para el proximo intento
+        if: steps.gen.outputs.hecho == 'generado'
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated
+          path: generated/
+          compression-level: 0
+          retention-days: 7
+
+      - name: 8c) Comprobar que generated/ tiene el codigo traducido
+        run: |
+          set -e
+          n=$(ls generated/main/*.c 2>/dev/null | wc -l)
+          m=$(ls generated/sdk/*.c 2>/dev/null | wc -l)
+          echo "generated/main: $n archivos .c"
+          echo "generated/sdk : $m archivos .c"
+          if [ "$n" -eq 0 ] || [ "$m" -eq 0 ]; then
+            echo "::error::make gen no produjo los .c esperados (main=$n, sdk=$m)."
+            exit 1
+          fi
+
+      - name: 9) Compilar libmain.so
+        env:
+          # Vulkan 1.2 (vkWaitSemaphores / vkGetSemaphoreCounterValue) esta en API 30+.
+          ANDROID_PLATFORM: android-30
+        run: |
+          set -e
+          rm -rf build-android generated/shims
+          ls runtime/hle/movie_stubs.c
+          cmake -S runtime -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=${ANDROID_PLATFORM:-android-29} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DSDL3_INCLUDE_DIR="$SDL3_INCLUDE" \
+            -DSDL3_LIB="$SDL3_LIB_DIR/libSDL3.so" \
+            "-DCMAKE_EXE_LINKER_FLAGS=-L$SDL3_LIB_DIR" \
+            "-DCMAKE_SHARED_LINKER_FLAGS=-L$SDL3_LIB_DIR" \
+            -DFFMPEG_INCLUDE_DIR="$FFMPEG_INCLUDE" \
+            -DBUILD_FFMPEG_STUBS=ON \
+            -DGLSLANG_INCLUDE_DIR="$GLSLANG_INCLUDE_DIR" \
+            -DSHADERC_INCLUDE_DIR="$SHADERC_INCLUDE_DIR" \
+            -DSPIRV_HEADERS_DIR="$SPIRV_HEADERS_DIR" \
+            "-DGLSLANG_LIB_DIR=$GLSLANG_LIB_DIR"
+          # -k 0: ninja NO se para en el primer error: sigue y los saca TODOS de
+          # una vez (asi un solo run da la lista completa).
+          set +e
+          cmake --build build-android --target main -j"$(nproc)" -- -k 0 > /tmp/build.log 2>&1
+          rc=$?
+          set -e
+          tail -3 /tmp/build.log
+          if [ $rc -ne 0 ]; then
+            echo "================ ERRORES (resumen) ================"
+            grep -E "error:|undefined reference|FAILED:" /tmp/build.log | head -50
+            echo "==================================================="
+            {
+              echo "### Errores de compilacion (resumen)"
+              echo '```'
+              grep -E "error:|undefined reference" /tmp/build.log | head -40
+              echo '```'
+              echo ""
+              echo "Log completo: artifact **build-log**."
+            } >> "$GITHUB_STEP_SUMMARY"
+            cp /tmp/build.log build.log.txt
+            echo "::error::La compilacion fallo. Mira el resumen arriba (paso 9) o el artifact build-log."
+            exit 1
+          fi
+          cp build-android/lib/arm64-v8a/libmain.so packaging/android/libs/arm64-v8a/
+          ls -lh packaging/android/libs/arm64-v8a/
+
+      - name: 9b) Guardar el log de compilacion (solo si fallo)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 10) Crear el APK
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.KS_PASS }}
+        run: |
+          set -e
+          mkdir -p packaging/android/build
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > packaging/android/build/allgenu.keystore
+            echo "KEYSTORE=$PWD/packaging/android/build/allgenu.keystore" >> "$GITHUB_ENV"
+            echo "KS_PASS=${KS_PASS:-allgenukey}" >> "$GITHUB_ENV"
+          fi
+          chmod +x packaging/android/build_apk.sh
+          bash packaging/android/build_apk.sh
+          ls -lh packaging/android/build/*.apk
+
+      - name: 11) Subir el APK (aqui lo descargas)
+        uses: actions/upload-artifact@v4
+        with:
+          name: AllGenURecomp-APK-arm64
+          path: packaging/android/build/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Resumen
+        run: |
+          {
+            echo "### APK listo"
+            echo ""
+            echo "Descargalo en **Artifacts -> AllGenURecomp-APK-arm64**."
+            echo "En el telefono: abre el zip, toca el .apk, instala."
+            echo ""
+            echo "Tus archivos del juego van en:"
+            echo 'Android/data/com.kriszts.allgenu/files/game/{exefs,romfs}'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -41,14 +41,37 @@
 
 #ifdef __ANDROID__
 #include <android/log.h>
-#define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, "AllGenU", __VA_ARGS__)
-#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO,  "AllGenU", __VA_ARGS__)
+#define ALOGE(...) android_log_error(__VA_ARGS__)
+#define ALOGI(...) android_log_note(__VA_ARGS__)
 #else
 #define ALOGE(...) fprintf(stderr, __VA_ARGS__)
 #define ALOGI(...) fprintf(stderr, __VA_ARGS__)
 #endif
 
 #include "../platform.h"
+
+// Registro a prueba de movil: ademas de logcat, todo va a
+// files/diagnostico.txt (android_jni.c), que se puede leer sin PC.
+void android_log_note(const char *fmt, ...);
+void android_log_error(const char *fmt, ...);
+void android_show_message(const char *msg);
+void android_status(const char *msg);
+
+// [AllGenU-Android] Trampa para fallos MUY tempranos: __cxa_guard_abort lo llama
+// el C++ cuando una variable static de una funcion se esta inicializando y algo
+// dentro aborta. Con -fno-exceptions eso pasa, entre otros sitios, en los static
+// del ShaderCompiler de shaderc, y el sintoma es justo una PANTALLA NEGRA sin
+// nada en el log. Con esto, el fallo se ve en pantalla y en diagnostico.txt.
+// (visibility protected: asi esta version no la puede sustituir la de libc++)
+__attribute__((visibility("protected")))
+void __cxa_guard_abort(void *g) {
+    (void)g;
+    android_log_error("FALLO inicializando una variable static (__cxa_guard_abort)");
+    android_show_message("Fallo al inicializar una parte del motor "
+                         "(compilador de shaders).\n\n"
+                         "El detalle queda en files/diagnostico.txt");
+    _exit(70);
+}
 
 // La ruta de datos de la app la pone android_jni.c (JNI_OnLoad / SDL_main).
 // Si esta vacia se cae a "." (util para pruebas en el telefono con adb shell).
@@ -116,6 +139,7 @@ bool plat_reserve_guest(uint64_t base, uint64_t size) {
         p = mmap((void *)(uintptr_t)base, size, PROT_NONE, flags | MAP_FIXED, -1, 0);
         if (p != (void *)(uintptr_t)base) {
             ALOGE("[plat] mmap de la ventana guest fallo: %s", strerror(errno));
+            android_status("ERROR: no pude reservar la memoria del juego (mmap)");
             return false;
         }
     }
@@ -127,6 +151,7 @@ bool plat_reserve_guest(uint64_t base, uint64_t size) {
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
     ALOGI("[plat] ventana guest %llx-%llx reservada", (unsigned long long)g_lo, (unsigned long long)g_hi);
+    android_status("C: memoria del juego (4 GB) reservada");
     return true;
 }
 
@@ -220,6 +245,8 @@ void plat_standalone(void) {
     if (!isatty(STDERR_FILENO)) {
         if (freopen("log.txt", "w", stderr)) { setvbuf(stderr, NULL, _IONBF, 0); g_own_log = true; }
     }
+    ALOGI("[plat] standalone: HOME=%s, log.txt=%s", home ? home : "(sin HOME)",
+          g_own_log ? "abierto" : "NO se pudo abrir");
 }
 
 static bool mkdir_p(const char *path) {

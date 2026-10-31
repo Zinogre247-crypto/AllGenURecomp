@@ -33,7 +33,7 @@ echo "== build-tools: $BUILD_TOOLS"
 echo "== android.jar: $ANDROID_JAR"
 echo "== strip      : ${NDK_STRIP:-<no encontrado, no se hace strip>}"
 
-rm -rf "$OUT"; mkdir -p "$OUT/classes"
+rm -rf "$OUT"; mkdir -p "$OUT/classes" "$OUT/inter"
 
 # ---------- 1. Java -> .class ----------
 echo "=== [1/7] javac"
@@ -48,6 +48,12 @@ find "$OUT/classes" -name '*.class' > "$OUT/classes.txt"
     --output "$OUT" $(cat "$OUT/classes.txt" | tr '\n' ' ')
 # (d8 deja OUT/classes.dex)
 
+# OJO: targetSdkVersion 29 a proposito.
+#  * Con 30+ Android aplica "scoped storage" y la app YA NO puede leer
+#    /sdcard/Download, donde el jugador pone su dump.
+#  * Con 29 (y los permisos del manifiesto) si puede: se pide el permiso al
+#    arrancar y el dump se lee de Download/ sin tocar nada mas.
+
 # ---------- 3. recursos ----------
 echo "=== [3/7] aapt2 compile"
 "$BUILD_TOOLS/aapt2" compile --dir "$PKG_DIR/res" -o "$OUT/res.zip"
@@ -55,11 +61,11 @@ echo "=== [3/7] aapt2 compile"
 # ---------- 4. aapt2 link ----------
 echo "=== [4/7] aapt2 link"
 "$BUILD_TOOLS/aapt2" link \
-    -o "$OUT/base.apk" \
+    -o "$OUT/inter/base.apk" \
     -I "$ANDROID_JAR" \
     --manifest "$PKG_DIR/AndroidManifest.xml" \
     --min-sdk-version 29 \
-    --target-sdk-version 34 \
+    --target-sdk-version 29 \
     --auto-add-overlay \
     "$OUT/res.zip"
 
@@ -83,18 +89,18 @@ echo "    libs: $(ls "$STAGE/lib/$ABI" | tr '\n' ' ')"
 
 # OJO: las .so DEBEN ir sin comprimir (-0), si no zipalign no puede alinearlas
 # a 16 KB y Android 15+ rechaza la instalacion.
-( cd "$STAGE" && zip -q -X -0 "$OUT/base.apk" lib/$ABI/*.so && zip -q -X "$OUT/base.apk" classes.dex )
+( cd "$STAGE" && zip -q -X -0 "$OUT/inter/base.apk" lib/$ABI/*.so && zip -q -X "$OUT/inter/base.apk" classes.dex )
 
 # ---------- 6. zipalign 16 KB (Android 15+) ----------
 echo "=== [6/7] zipalign -P 16"
 if [ -x "$BUILD_TOOLS/zipalign" ]; then
-    "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$OUT/base.apk" "$OUT/aligned.apk"
+    "$BUILD_TOOLS/zipalign" -P 16 -f 4 "$OUT/inter/base.apk" "$OUT/inter/aligned.apk"
 else
     # Termux no trae zipalign en build-tools: usar el emulador en Python
-    python3 "$ROOT/tools/zipalign.py" -P 16 "$OUT/base.apk" "$OUT/aligned.apk"
+    python3 "$ROOT/tools/zipalign.py" -P 16 "$OUT/inter/base.apk" "$OUT/inter/aligned.apk"
 fi
 # Comprobacion: .so en offset multiplo de 16384 y sin comprimir
-python3 "$ROOT/tools/zipalign.py" -c -P 16 "$OUT/aligned.apk" || {
+python3 "$ROOT/tools/zipalign.py" -c -P 16 "$OUT/inter/aligned.apk" || {
     echo "ALINEACION INCORRECTA"; exit 1; }
 
 # ---------- 7. firmar ----------
@@ -111,7 +117,7 @@ fi
     --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
     --min-sdk-version 24 \
     --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
-    --out "$APK" "$OUT/aligned.apk"
+    --out "$APK" "$OUT/inter/aligned.apk"
 
 "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK" | head -n 12
 echo

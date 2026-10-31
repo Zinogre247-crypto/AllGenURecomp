@@ -9,6 +9,14 @@
 #include "kernel.h"
 #include "mods.h"
 
+// [AllGenU-Android] aviso en pantalla (AllGenUActivity) y en el log.
+#if defined(__ANDROID__)
+void android_status(const char *msg);
+static void android_status_note(const char *msg) { android_status(msg); }
+#else
+static void android_status_note(const char *msg) { (void)msg; }
+#endif
+
 const char *g_game_dir = "game";  // folder holding exefs/ and romfs/ (the player's own dump)
 
 // rtld normally runs every module's DT_INIT (which registers it with musl and runs its init_array) before
@@ -73,12 +81,14 @@ static void boot(const char *root) {
 
 int main(int argc, char **argv) {
     plat_init();
+    android_status_note("C: main arrancando");
     setvbuf(stderr, NULL, _IONBF, 0);
     bool given = false;
     for (int i = 1; i < argc; i++)
         if (argv[i][0] != '-') g_game_dir = argv[i], given = true;
     if (getenv("MHGU_GAME_DIR")) g_game_dir = getenv("MHGU_GAME_DIR"), given = true;
     if (!given) {  // standalone (the build folder): data\ holds the game files; caches, mods and log.txt beside, saves
+        android_status_note("C: buscando los archivos del juego");
         plat_standalone();  // in the player's folder (%APPDATA%\AllGenURecomp\save)
         static char data[1100] = "data";
         char exe[1024];
@@ -123,8 +133,10 @@ int main(int argc, char **argv) {
         }
     }
     { void fnprof_init(void); fnprof_init(); }
+    android_status_note("C: creando la ventana (SDL/Vulkan)");
     crash_handler_install();
     ui_init();
+    android_status_note("C: ventana lista; cargando el juego");
     boot(g_game_dir);
     return ui_run();
 }

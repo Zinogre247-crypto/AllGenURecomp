@@ -135,7 +135,9 @@ target_compile_definitions(main PRIVATE
 target_compile_options(main PRIVATE
     -fPIC -O3 -ffunction-sections -fdata-sections
     -Wno-unused-parameter -Wno-sign-compare
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-nullability-completeness>)
+    # [AllGenU-Android] excepciones en TODO el C++: shaderc y glslang las
+    # necesitan (con -fno-exceptions abortan al inicializar -> pantalla negra).
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-nullability-completeness;-fexceptions>)
 
 target_link_options(main PRIVATE
     -Wl,--gc-sections
@@ -181,6 +183,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/shaderc_glslang.cpp")
     else()
         message(FATAL_ERROR "Falta -DGLSLANG_LIB_DIR=... (libglslang.a compilada para Android)")
     endif()
+endif()
+
+# [AllGenU-Android] shaderc TIENE que compilarse CON excepciones.
+# Con -fno-exceptions, shaderc/glslang abortan al inicializar sus objetos static
+# (ShaderCompiler, InitializeProcess, ...): el resultado es una PANTALLA NEGRA
+# nada mas abrir la app. y el error no sale en ningun log util.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/shaderc_glslang.cpp")
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/shaderc_glslang.cpp"
+        PROPERTIES COMPILE_OPTIONS "-fexceptions;-frtti")
+    message(STATUS "shaderc: compilado con -fexceptions")
 endif()
 
 # Vulkan 1.3 que VMA referencia pero que el header de Android no declara
