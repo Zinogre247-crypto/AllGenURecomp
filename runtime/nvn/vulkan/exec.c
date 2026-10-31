@@ -57,18 +57,50 @@ static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 static void ss_forget(void);
 
+// [AllGenU-Android] Vulkan 1.2 (vkGetSemaphoreCounterValue / vkWaitSemaphores) no
+// esta en libvulkan.so de Android 9-10: se resuelve con vkGetDeviceProcAddr en
+// tiempo de ejecucion. Si el driver no lo tiene, se cae a una espera de respaldo
+// (vkQueueWaitIdle), asi el juego funciona igual aunque mas lento.
+static PFN_vkGetSemaphoreCounterValue g_pfn_get_counter;
+static PFN_vkWaitSemaphores g_pfn_wait_sems;
+static bool g_sem_looked, g_sem_ok;
+
+static void sem_resolve(void) {
+    if (g_sem_looked) return;
+    g_sem_looked = true;
+    PFN_vkGetDeviceProcAddr gdpa =
+        (PFN_vkGetDeviceProcAddr)vkGetDeviceProcAddr(g_vk.dev, "vkGetDeviceProcAddr");
+    if (!gdpa) return;
+    g_pfn_get_counter = (PFN_vkGetSemaphoreCounterValue)gdpa(g_vk.dev, "vkGetSemaphoreCounterValue");
+    g_pfn_wait_sems = (PFN_vkWaitSemaphores)gdpa(g_vk.dev, "vkWaitSemaphores");
+    g_sem_ok = g_pfn_get_counter && g_pfn_wait_sems;
+    if (!g_sem_ok) LOG("[vk] sin timeline semaphores (Vulkan < 1.2): espera con queue idle\n");
+}
+
 uint64_t vk_completed_seq(void) {
+    sem_resolve();
     uint64_t v = 0;
-    vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v);
-    return v;
+    if (g_sem_ok) {
+        g_pfn_get_counter(g_vk.dev, g_vk.timeline, &v);
+        return v;
+    }
+    // respaldo: no hay contador, se asume que lo enviado ya termino
+    vkQueueWaitIdle(g_vk.queue);
+    return vk_pending_seq();
 }
 
 void vk_wait_seq(uint64_t seq) {
     if (!seq || vk_exiting()) return;  // (exit in progress: never reach the driver from a late guest thread)
     uint64_t t0_ = plat_now_ns();
-    VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
-                              .pValues = &seq};
-    VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
+    sem_resolve();
+    VkResult r;
+    if (g_sem_ok) {
+        VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
+                                  .pSemaphores = &g_vk.timeline, .pValues = &seq};
+        r = g_pfn_wait_sems(g_vk.dev, &wi, 10ull * 1000000000ull);
+    } else {
+        r = vkQueueWaitIdle(g_vk.queue);  // respaldo sin timeline semaphores
+    }
     stat_wait_ns += plat_now_ns() - t0_;
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r != VK_SUCCESS) FATAL("vkWaitSemaphores: %d (device lost)\n", r);

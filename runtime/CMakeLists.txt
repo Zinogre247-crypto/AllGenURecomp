@@ -183,6 +183,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/shaderc_glslang.cpp")
     endif()
 endif()
 
+# Vulkan 1.3 que VMA referencia pero que el header de Android no declara
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/vk13_stubs.c")
+    target_sources(main PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/nvn/vulkan/vk13_stubs.c")
+    message(STATUS "Vulkan 1.3: stubs para VMA")
+endif()
+
 # VulkanMemoryAllocator: header-only en third_party/vma; su implementacion va en
 # un .c aparte (vma_impl.c) para que no se dupliquen simbolos.
 foreach(_vma_impl nvn/vulkan/vma_impl.cpp nvn/vulkan/vma_impl.c)
