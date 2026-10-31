@@ -83,6 +83,6 @@ typedef struct { const char *name; ServiceHandler handler; } ServiceDef;
 #endif
 #define SERVICE(sname, fn)                                                                  \
     static void fn(Service *s, IpcReq *req, IpcResp *resp);                                 \
-    __attribute__((used, section(SERVICE_SECTION))) static const ServiceDef                 \
+    __attribute__((used, retain, section(SERVICE_SECTION))) static const ServiceDef                 \
         HLE_CAT(svc_def_, __LINE__) = {sname, fn};                                          \
     static void fn(Service *s, IpcReq *req, IpcResp *resp)

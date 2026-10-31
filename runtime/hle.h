@@ -19,7 +19,7 @@ typedef struct { const char *name; HostFn fn; } HleImplEntry;
 #endif
 #define HLE_FUNC(sym, fn)                                                                   \
     static void fn(Cpu *c);                                                                 \
-    __attribute__((used, section(HLE_SECTION))) static const HleImplEntry                   \
+    __attribute__((used, retain, section(HLE_SECTION))) static const HleImplEntry                   \
         HLE_CAT(hle_entry_, __LINE__) = {sym, fn};                                          \
     static void fn(Cpu *c)
 
@@ -28,7 +28,7 @@ typedef struct { const char *name; HostFn fn; } HleImplEntry;
 // call of hle_<symbol with non-identifier characters as '_'>, which is cname prefixed with hle_).
 #define HLE_SDK(sym, cname)                                                                 \
     void hle_##cname(Cpu *c);                                                               \
-    __attribute__((used, section(HLE_SECTION))) static const HleImplEntry                   \
+    __attribute__((used, retain, section(HLE_SECTION))) static const HleImplEntry                   \
         HLE_CAT(hle_entry_, __LINE__) = {sym, hle_##cname};                                 \
     void hle_##cname(Cpu *c)
 

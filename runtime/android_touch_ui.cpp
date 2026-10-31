@@ -280,6 +280,7 @@ static bool g_gear_down;
 // Una llamada por frame desde runtime/overlay.cpp, antes de ImGui::Render().
 //   scale: altura de la ventana / 720
 //   menu_open: el menu del port (Escape) o el de Forge estan abiertos
+extern "C" {
 void android_touch_overlay_frame(float scale, bool menu_open) {
     ImGuiIO &io = ImGui::GetIO();
     if (io.DisplaySize.x <= 0 || io.DisplaySize.y <= 0) return;
@@ -323,3 +324,5 @@ void android_touch_overlay_frame(float scale, bool menu_open) {
     // cerrar el panel con el boton de "terminar" ya vacia el editor; si el menu
     // principal se abre, el panel se queda detras
 }
+
+}  // extern "C"
